@@ -1,0 +1,47 @@
+name: tests
+
+# Separate from scan.yml on purpose. That workflow needs mail and ledger
+# secrets and mutates delivery state; this one must run on a fork's pull
+# request, where no secret is available, so the two cannot share a job.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  # Per ref, and cancel-in-progress unlike scan.yml: a superseded commit's test
+  # result answers nothing, whereas a superseded scan may already have sent mail.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # --offline, never the full suite. The live section asserts lower bounds
+      # against real sites, and Luma answers HTTP 429 to repeated fetches, so a
+      # per-push live run would fail on other people's rate limits rather than
+      # on this repository's changes.
+      #
+      # -B because check.py asserts over source files and a stale __pycache__
+      # from a different interpreter has no business deciding a CI result.
+      - name: Design invariants
+        run: python -B check.py --offline
+
+      - name: Privacy regressions
+        run: python -B -m unittest -v test_privacy

@@ -1,0 +1,166 @@
+name: event-scout
+
+on:
+  schedule:
+    # :17 — off the :00/:30 peak, where GitHub sheds and delays the most
+    # scheduled runs. Still best effort: a run may be delayed or dropped.
+    # Hourly is enough here. Event listings appear days before their date, and
+    # the score cache means a repeat sighting costs no model call, so a tighter
+    # cadence would buy latency the deadlines do not need.
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: event-scout
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      # Fail before any setup if a secret is missing. Without this a missing
+      # mail secret gives a green run and no digest, which is the one outcome
+      # that looks like success and is not. Only emptiness is tested.
+      - name: Check required secrets
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RESUME_TEXT: ${{ secrets.RESUME_TEXT }}
+        run: |
+          missing=()
+          for name in GMAIL_USER GMAIL_APP_PASSWORD MAIL_TO; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing mail secret(s): ${missing[*]}."
+            exit 1
+          fi
+          if [ -z "$RESUME_TEXT" ]; then
+            echo "::error::RESUME_TEXT is empty. Without a profile the fit axis
+            collapses to a constant for every event and ranking is decided by
+            access_value alone."
+            exit 1
+          fi
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::notice::OPENAI_API_KEY not set. The codex CLI does not exist
+            on a runner, so scoring falls back to keywords and only the
+            schema.org half of date extraction runs."
+          fi
+          echo "Secret check passed."
+
+      - name: Check out code (main)
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Prepare private ledger
+        env:
+          LEDGER_REPOSITORY: ${{ secrets.LEDGER_REPOSITORY }}
+          LEDGER_TOKEN: ${{ secrets.LEDGER_TOKEN }}
+        run: python -m eventscout.private_ledger prepare
+
+      - name: Run scan
+        id: scan
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RESUME_TEXT: ${{ secrets.RESUME_TEXT }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          # Mailbox reading is optional in the cloud. Left unset, that source
+          # prints a [skip] line instead of failing the run.
+          GMAIL_READ_USER: ${{ secrets.GMAIL_READ_USER }}
+          GMAIL_READ_APP_PASSWORD: ${{ secrets.GMAIL_READ_APP_PASSWORD }}
+          GMAIL_READ_LABELS: ${{ secrets.GMAIL_READ_LABELS }}
+          LEDGER_DIR: .ledger/cloud_data
+        # Output goes to a file, not to stdout, because the Actions log of a
+        # PUBLIC repository is public and the funnel prints event titles and
+        # label names. The file is committed to the private ledger repository by
+        # the next step, so a failure stays diagnosable. Withholding it and
+        # keeping it nowhere was the earlier behaviour and left a cloud failure
+        # with no evidence at all.
+        run: |
+          mkdir -p .private
+          if python run.py > .private/scan.log 2>&1; then
+            echo "Scan completed. Full output is in the private ledger repository."
+          else
+            status=$?
+            # Exit code only. No line of the log is quoted, because a failing
+            # run's last lines are as likely to be a source diagnostic naming a
+            # URL as they are to be a bare exception type.
+            echo "::error::Scan failed with exit ${status}. Full output is in the private ledger repository under cloud_logs/scan.log."
+            exit "$status"
+          fi
+
+      - name: Save private ledger
+        # Persist delivery state even if a later stage of the scan failed.
+        if: ${{ !cancelled() && steps.scan.conclusion != 'skipped' }}
+        env:
+          LEDGER_REPOSITORY: ${{ secrets.LEDGER_REPOSITORY }}
+          LEDGER_TOKEN: ${{ secrets.LEDGER_TOKEN }}
+        run: python -m eventscout.private_ledger save
+
+  # One email per failure streak instead of GitHub's per-failure mail. Fires on
+  # the 3rd consecutive failure only. It cannot fire for a run that never starts,
+  # so do not rely on it as the sole signal.
+  notify-failure:
+    needs: scan
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Email on 3rd consecutive failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: |
+          mkdir -p .private
+          python - > .private/notify.log 2>&1 <<'EOF'
+          import json, os, smtplib, urllib.request
+          from email.message import EmailMessage
+
+          repo, run_id = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
+          FAIL = {"failure", "cancelled", "timed_out"}
+          # status=completed excludes the current run, so this list starts at the
+          # previous one.
+          url = (f"https://api.github.com/repos/{repo}/actions/workflows/"
+                 "scan.yml/runs?status=completed&per_page=5")
+          req = urllib.request.Request(url, headers={
+              "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              "Accept": "application/vnd.github+json"})
+          with urllib.request.urlopen(req) as resp:
+              prev = [r["conclusion"] for r in json.load(resp)["workflow_runs"]]
+
+          if len(prev) < 2 or prev[0] not in FAIL or prev[1] not in FAIL:
+              print(f"Streak below 3 (previous: {prev[:3]}); not emailing.")
+              raise SystemExit(0)
+          if len(prev) >= 3 and prev[2] in FAIL:
+              print("Streak already alerted at 3; not emailing again.")
+              raise SystemExit(0)
+
+          msg = EmailMessage()
+          msg["Subject"] = "[event-scout] 3 consecutive workflow failures"
+          msg["From"] = os.environ["GMAIL_USER"]
+          msg["To"] = os.environ["MAIL_TO"]
+          msg.set_content(
+              "event-scout has failed 3 times in a row.\n"
+              f"Latest run: https://github.com/{repo}/actions/runs/{run_id}\n")
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+              server.login(os.environ["GMAIL_USER"], os.environ["GMAIL_APP_PASSWORD"])
+              server.send_message(msg)
+          print("Alert email sent.")
+          EOF

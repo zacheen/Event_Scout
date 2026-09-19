@@ -1,0 +1,40 @@
+cloud_events.db
+local_events.db
+.env
+.env.*
+!.env.example
+profile.txt
+resume*.txt
+cloud_data/
+.ledger/
+.private/
+*.db-wal
+*.db-shm
+*.db-journal
+__pycache__/
+*.pyc
+
+# Raw page dumps kept on disk for debugging. Never published, since they are
+# large scraped HTML and carry no value to a reader of the repo.
+cv_*.out
+
+# Agent scratch notes. Ignored rather than curated, because they record
+# working assumptions about the author that the code itself does not.
+.claude/
+
+# The known-defect register, its two companions, and the research notes. Local
+# only, because each records what a real run did against a private mailbox.
+#
+# The case has to match the file on disk. A rule written `Todo.md` still matches
+# on Windows, where core.ignorecase is true, and silently stops matching on a
+# case-sensitive runner, which is where the file would actually be published.
+TODO.md
+REVIEW_FINDINGS.md
+DECISIONS.md
+PROJECT_OVERVIEW.md
+CLAUDE.local.md
+notes/
+
+# Editor and hand-made backups. Committing one publishes a stale second copy of
+# a file that is already in the tree.
+*.bak

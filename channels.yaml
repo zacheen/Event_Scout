@@ -1,0 +1,417 @@
+# Channel -> adapter mapping for Event Scout. Add/remove freely.
+# Secrets are NOT here. They live in .env locally and in Actions secrets in the cloud.
+#
+# Profile this file is tuned for: Northeastern, San Francisco Bay Area, US tech,
+# in-person Bay Area events plus anything virtual. Boston-only events are excluded
+# by the client-side geo filter, not by the source list.
+#
+# Keys build_sources actually reads, per adapter. Anything not named here or in
+# the next paragraph is a human note that nothing reads and nothing warns about.
+#   jsonld:       name; url; status
+#   wordpress:    name; url; status
+#   gmail:        status; newer_than_days  (mailbox and labels come from .env)
+#   newsletters:  name; host; status; archive_path (default /archive)
+#
+# Read by build_geo rather than build_sources: `in_region` on a jsonld or
+# wordpress entry, which seeds GeoFilter's venue-only fallback. Deleting it as
+# if it were a note costs the 15 events that fallback exists for.
+#
+# Adapters sketched during research but never written, so any entry using one is
+# inert. They are listed to keep the research record, not as available options.
+#   localist:     host; types (list of numeric type ids)
+#   ical:         url
+#   rss:          url
+#   page_diff:    url; browser (bool, true when plain HTTP gets 403)
+#   url_pattern:  template; vars (probes a known URL scheme directly)
+#   html_search:  url (server-rendered search page, parsed as HTML)
+#
+# Two keys that look supported and are not: a `senders` allowlist on a gmail
+# entry (no From-domain filtering exists) and `kind: substack` on a newsletter
+# (the archive parser is written against beehiiv markup only). The `kind` field
+# present on today's entries is a note to the reader, nothing reads it.
+#
+# Verification status is recorded per entry. "verified" means an HTTP probe on
+# 2026-09-06 or 2026-09-07 returned usable data. "spike" means the adapter needs
+# a feasibility check first. Never promote a spike to verified without a probe.
+#
+# ---------------------------------------------------------------------------
+# Of one batch of nine sites submitted, four were taken, and they are the
+# jsonld entries marked "Added 2026-09-07". That cut applies to that batch
+# alone. Anything verified before it stays regardless.
+#
+# Which sources are active, decided-but-not-running, or held back despite
+# working is recorded per entry below via `status`, not repeated here.
+#
+# Never verified, so still out: simplify-jobs, jobright, devpost, mlh,
+# employer-university-pages. Probe before promoting any of them.
+#
+# Probed 2026-09-07 and REJECTED, recorded so they are not re-suggested:
+#   events.stanford.edu   24 events, valid JSON-LD, Palo Alto, but a general
+#                         campus calendar (seminars, film screenings, tours) --
+#                         same trap as the Northeastern Boston Localist feed.
+#                         Its 0-in-scope result is only because venues read
+#                         "Encina Hall"; in_region would let all 24 in.
+#   events.berkeley.edu, career.berkeley.edu, sjsu.edu/careercenter, mlh.io,
+#   devpost.com, deep-tech-week.com          no schema.org markup
+#   luma.com/ai                              no markup on that page type
+#   luma.com/ai-events                       9 events, all online marketing webinars
+#   luma.com/ai-plus                         a single 2027 conference
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Geo filter. South Bay centred, NOT San Francisco centred. A 50mi radius from
+# these three still reaches SF, Oakland and Berkeley, so city-name matching
+# alone would be both too narrow (misses Palo Alto, Sunnyvale, Fremont) and too
+# broad (matches any "San Francisco Bay Area" string on a remote listing).
+# ---------------------------------------------------------------------------
+geo:
+  anchors:
+    - {label: "San Jose, CA",      lat: 37.336157, lon: -121.890608, radius_mi: 50}
+    - {label: "Mountain View, CA", lat: 37.393816, lon: -122.078961, radius_mi: 50}
+    - {label: "Santa Clara, CA",   lat: 37.352310, lon: -121.961900, radius_mi: 50}
+  # Virtual events bypass the radius test entirely.
+  # For JSON-LD sources this is `eventAttendanceMode` == OnlineEventAttendanceMode.
+  accept_virtual: true
+  # Every source here exposes only a city string (Cerebral Valley's
+  # location.name reads "San Francisco, CA"), so GeoFilter.keep matches on city
+  # NAMES and the lat/lon/radius above are not consulted at all today. They are
+  # kept because they state the intended scope and because GeoFilter.distance_mi
+  # already computes against them; wiring a geocoder in is what would make the
+  # radius live. See geo.py.
+
+# ---------------------------------------------------------------------------
+# TIER A1 - Gmail label. Highest recall, zero ToS risk.
+# Recall here is bought by Gmail rules, not by code: whatever your rules put in
+# the label is what this reads, so a new newsletter needs no change anywhere.
+# ---------------------------------------------------------------------------
+gmail:
+  - name: mail-labels
+    adapter: gmail_label
+    # WHICH mailbox and WHICH labels are NOT here. They are GMAIL_READ_USER,
+    # GMAIL_READ_APP_PASSWORD and GMAIL_READ_LABELS in .env, because a label
+    # name describes a private mailbox and this file is published. One account
+    # only, and GMAIL_READ_LABELS is a comma separated list, so a label name
+    # containing a comma cannot be expressed. See config._parse_labels.
+    #
+    # This entry still decides whether the adapter runs at all. Deleting it
+    # disables mailbox reading however the environment is set.
+    status: verified
+    # No sender allowlist on purpose. The label IS the filter.
+
+# ---------------------------------------------------------------------------
+# TIER A1b - schema.org JSON-LD, the highest leverage adapter in the system.
+#
+# A page carrying <script type="application/ld+json"> with @type Event gives
+# startDate, endDate, location, organizer, url and eventAttendanceMode as exact
+# typed fields. That means NO LLM EXTRACTION and no per-site parser, which
+# removes the single largest correctness risk in the original design (date and
+# timezone hallucination). Most event platforms emit this markup for SEO, so
+# one adapter covers many sites. The LLM extractor is now the FALLBACK for
+# sources without markup, not the primary path.
+# ---------------------------------------------------------------------------
+jsonld:
+  - name: neu-silicon-valley-luma
+    adapter: jsonld
+    url: https://luma.com/NUSiliconValleyCampus
+    status: verified
+    priority: highest
+    in_region: true
+    # Probed 2026-09-07, 15 schema.org Events, almost all career programming.
+    # The Silicon Valley campus runs a Luma calendar rather than the Localist
+    # feed the Boston campus uses, so the weak yield measured under TIER A3
+    # says nothing about this one.
+    # Note lu.ma/<slug> 301s to luma.com/<slug>, so use the luma.com form.
+
+  - name: luma-genai-sf
+    adapter: jsonld
+    url: https://luma.com/genai-sf
+    status: verified
+    # Probed 2026-09-07: 20 schema.org Events. This CLOSES the Luma spike that
+    # was open since 2026-09-06. Every api.lu.ma/discover/* path returned 404,
+    # but the internal API was never needed -- the public calendar page carries
+    # JSON-LD. Do not chase the API.
+
+  - name: neu-bayarea-student-life
+    adapter: jsonld
+    url: https://studentlife.bayarea.northeastern.edu/events/
+    status: verified
+    in_region: true
+    # This feed only ever publishes events at the Bay Area campus, so a
+    # venue-only location such as "Welcome Center" or "Room 1045" inherits the
+    # region instead of failing the city-name test -- without it, all 15
+    # student-life events (probed 2026-09-07) are discarded as out of region.
+    # Student-life rather than career events, so expect a lower access_value on
+    # average, but it is the Bay Area campus feed and costs one more config line.
+
+  # Added after a search-and-probe round. Overlap against the three existing
+  # sources was measured, not assumed: 24 unique in-scope events before,
+  # 65 after, with only 4 duplicates across all candidates. These calendars are
+  # complementary rather than redundant, which is why all three earn their place.
+  - name: luma-sf
+    adapter: jsonld
+    url: https://luma.com/sf
+    status: verified
+    # 20 events, 12 in scope, +11 new. Best marginal value of the batch and zero
+    # blank locations, e.g. "NVIDIA Dev Community Meetup", "Bay Area Frontier
+    # Research Club", "Agents in Sales: Fireside Chat".
+
+  - name: luma-discover-sf-ai
+    adapter: jsonld
+    url: https://luma.com/discover/sf/ai
+    status: verified
+    # 25 events, 10 in scope, +8 new. Luma's own aggregation across many SF AI
+    # calendars, so it reaches organisers we do not track individually.
+
+  - name: luma-ai-sf
+    adapter: jsonld
+    url: https://luma.com/ai-sf
+    status: verified
+    # 19 events, 8 in scope, +7 new. Strongest SOUTH BAY coverage of the three:
+    # Palo Alto, Sunnyvale and the Santa Clara Convention Center all appear,
+    # which the SF-centric calendars mostly miss.
+
+  - name: eventbrite-sf-tech-career
+    adapter: jsonld
+    url: https://www.eventbrite.com/d/ca--san-francisco/tech-career-fair/
+    status: verified
+    # Only 1 of 18 events survives the geo filter, so this looks like a poor
+    # source by volume. Kept anyway because that one was "San Francisco Job Fair
+    # October 8, 2026": a career fair is the highest access_value category there
+    # is, and this is the only source in the set that surfaces them at all.
+    # Judge this source on category, never on count.
+
+  - name: cerebral-valley-events
+    adapter: jsonld
+    url: https://cerebralvalley.ai/events
+    status: verified
+    # The main Bay Area AI event feed.
+    #
+    # Verified shape: ItemList with numberOfItems 20, each itemListElement.item
+    # typed ["Event", "Hackathon"] and carrying the full field set
+    #   @type description endDate eventAttendanceMode eventStatus image
+    #   isAccessibleForFree location name offers organizer performer
+    #   startDate url
+    # `location.name` reads "San Francisco, CA" / "New York, NY" / "Boston, MA",
+    # so the Bay Area geo filter is a plain string match. `eventAttendanceMode`
+    # satisfies the accept-all-virtual rule without any heuristic.
+    #
+    # Note the newsletter lives on a custom domain, so cerebralvalley.beehiiv.com
+    # 404s on both /archive and /feed. Use this page, not the beehiiv host.
+
+# ---------------------------------------------------------------------------
+# TIER A2 - Newsletter archives. Public HTML, readable while unsubscribed.
+# The tier that reaches employer campaign events, which are announced by mail
+# and appear on no calendar.
+# ---------------------------------------------------------------------------
+newsletters:
+  - name: direct-consideration
+    adapter: newsletter
+    kind: beehiiv
+    host: directconsideration.beehiiv.com
+    archive_path: /archive
+    status: verified
+    poll: daily
+    # /feed and /rss.xml both 404, so RSS is not available. Do NOT scrape the
+    # /p/<slug> anchors though: the archive page embeds a JSON blob carrying
+    # slug, publish date, is_premium and audience per post, which survives a
+    # template restyle that would break link scraping. Parse that instead.
+    #
+    # Measured 2026-09-06. Publication level premium_enabled and
+    # premium_purchasable are both false, and every post is is_premium false /
+    # audience "free", so a subscription would grant nothing the archive lacks.
+    # Five posts exist, dated 2026-08-10, 08-17, 08-26 and 08-31 plus one
+    # unnumbered, i.e. roughly weekly since launch. Daily polling therefore lags
+    # at most one day on a newsletter that announces events days ahead, which is
+    # why this is not on the hourly tier.
+    #
+    # /p/direct-consideration-004 is the backtest fixture. It carries an
+    # employer resume-review event that reached no other source, which is what
+    # makes it worth pinning.
+
+  - name: simplify-jobs
+    adapter: newsletter
+    kind: beehiiv
+    host: simplify.jobs
+    status: spike
+
+  - name: jobright
+    adapter: newsletter
+    kind: beehiiv
+    host: jobright.ai
+    status: spike
+
+# ---------------------------------------------------------------------------
+# TIER A3 - Campus calendars. DOWNGRADED from the original design.
+# Measured yield: type=12901 (Career Building/Networking) returned 2 events
+# over 365 days. This calendar is mostly athletics and academic seminars, so it
+# is cheap to keep but must not be relied on. The real Northeastern career
+# events live in Handshake and reach us through TIER A1 instead.
+# ---------------------------------------------------------------------------
+calendars:
+  - name: northeastern-localist
+    adapter: localist
+    host: calendar.northeastern.edu
+    # The probe returned usable data, but no localist adapter exists and
+    # build_sources never reads this block, so plain "verified" would claim
+    # this feed is running. That word is exact-matched precisely so it can be
+    # trusted to mean "started".
+    status: verified_no_adapter
+    # ONLY `type` filters. `department_id`, `group_id` and `keyword` are accepted
+    # with HTTP 200 and then SILENTLY IGNORED, returning the unfiltered feed.
+    # A filter regression here fails open into 48 volleyball games, so the
+    # adapter must assert filtered results differ from the unfiltered baseline.
+    types:
+      - 12901   # Career Building/Networking  <- the one that matters
+      - 12894   # Webinar (virtual, attendable from the Bay Area)
+      - 12897   # Panel/Roundtable Discussion
+      - 12884   # Conference
+      - 50753674134338  # AI Workshop
+    # Repeat `type[]=` for multiple ids. Recurring events return duplicate event
+    # ids within one response, so dedupe on id before the pipeline sees them.
+    # Bay Area scoping CANNOT be done server-side. Filter client-side on the
+    # event's Pacific timezone, `experience` field, and address.
+    geo_filter: client_side
+
+# Useful department ids discovered while probing. Unusable as query params today,
+# but they appear inside event payloads, so they are worth keeping for
+# client-side matching and for the day Localist fixes the filter.
+#   30521592330753  San Francisco | Bay Area   <- primary geo match
+#   51966280959908  Mills College (the Oakland campus)
+#   14460           Career Services
+#   47602           Co-op
+#   19592           Coop Deadline
+#   87094           ISSI (international student office, deadline-driven sessions)
+#   29559           Virtual Events
+#   12916           Khoury College of Computer Sciences
+#   12917           College of Engineering
+
+# ---------------------------------------------------------------------------
+# TIER A1c - WordPress REST, a third structured path.
+# Many university and org sites are WordPress, and /wp-json/wp/v2/types lists
+# the post types, so probe THAT first to find out whether a site has real typed
+# events or only blog posts. The difference decides whether the LLM is needed.
+# ---------------------------------------------------------------------------
+wordpress:
+  - name: neu-alumni-events
+    adapter: wordpress_rest
+    url: https://alumni.northeastern.edu/wp-json/wp/v2/event
+    status: verified
+    # Probed 2026-09-07: 100 items with a real event post type carrying
+    # end_date_time, event-category, event-location, event-type and event_types.
+    # Bay Area hits already present, e.g. "Oakland Tech Week 2026" and
+    # "Welcome to Your City 2026 - San Francisco".
+    #
+    # TRAP: the top-level `date` field is the POST publication date, not the
+    # event start. Sorting or filtering on it would order the digest by when
+    # someone typed the listing. Find the real start field before using this.
+
+  # NEURAI Lab was probed and works, but is left out on yield for effort. Its
+  # `calendar_event` post type returns 0 items, so events sit in ordinary posts
+  # and would need LLM date extraction for a low yield. Endpoint kept here only
+  # so it is not re-probed from scratch:
+  #   https://neurai.sites.northeastern.edu/wp-json/wp/v2/posts  (RSS at /feed/)
+
+# ---------------------------------------------------------------------------
+# TIER B - Bay Area event platforms. Higher value here than in Boston because
+# the Bay Area tech event density is much greater. Each needs a spike first.
+# ---------------------------------------------------------------------------
+platforms:
+  - name: meetup-bay-area-tech
+    adapter: jsonld           # it does emit schema.org Event, contrary to the
+                              # earlier html_search assumption
+    url: "https://www.meetup.com/find/?keywords={kw}&location=us--ca--San%20Francisco"
+    status: verified_but_held
+    keywords: ["ai", "machine learning", "software engineering", "career", "hiring"]
+    # Technically the highest-yield candidate probed on 2026-09-07: 30 events,
+    # 14 in scope, and ZERO overlap with anything else. Held back on PRECISION,
+    # not on whether it works. Nine of those 14 have a blank location, and the
+    # visible content includes obvious spam, with "How To Create An Easy Income
+    # With AI" listed twice. Volume alone does not earn a slot. Revisit only
+    # with a quality filter in front of it.
+
+  # The generic `luma` spike is CLOSED, and Luma turned out to scale for free:
+  # any luma.com/<slug> calendar works through the existing JsonLdSource with no
+  # new code, so adding one is a single config entry. Verified slugs live in the
+  # jsonld block above.
+  # The eventbrite spike is likewise closed and promoted to the jsonld block.
+
+  - name: devpost
+    adapter: html_search
+    status: spike             # /api/hackathons returned 403 to a plain client
+
+  - name: mlh
+    adapter: html_search
+    status: spike             # /seasons/2026/events 302s to the current season
+
+# ---------------------------------------------------------------------------
+# TIER B2 - Employer pages. Only worth it for companies you actually target.
+# ---------------------------------------------------------------------------
+employers:
+  - name: tesla-university-events
+    adapter: url_pattern
+    template: "https://www.tesla.com/event/{school}-resume"
+    vars:
+      school: ["northeastern"]
+    browser: true
+    status: verified_pattern
+    # The scheme was recovered from the beehiiv archive, which listed the same
+    # campaign for northeastern, georgia-tech, purdue, umiami and ncch. Probing
+    # your own school directly is near-zero cost and needs no crawling.
+    # Plain HTTP gets 403 from tesla.com, so this REQUIRES a headless browser
+    # fetch. Same constraint applies to any page_diff entry against tesla.com.
+
+  # Seed set for page_diff, all Bay Area HQ or major Bay Area presence.
+  # Start with browser: false and flip to true on the first 403.
+  - name: employer-university-pages
+    adapter: page_diff
+    status: spike
+    browser: false
+    urls:
+      - https://www.nvidia.com/en-us/about-nvidia/careers/university-recruiting/
+      - https://www.google.com/about/careers/applications/students/
+      - https://www.metacareers.com/students
+      - https://www.apple.com/careers/us/students.html
+      - https://www.databricks.com/company/careers/university-recruiting
+      - https://openai.com/careers/
+      - https://www.anthropic.com/careers
+      - https://scale.com/careers
+      - https://stripe.com/jobs/university
+      - https://www.figma.com/careers/
+      - https://waymo.com/careers/
+
+# ---------------------------------------------------------------------------
+# TIER C - Deferred by explicit decision.
+# ---------------------------------------------------------------------------
+deferred:
+  - name: handshake
+    adapter: none
+    status: routed_via_gmail
+    # No scraping and no stored session cookie. Turn on Handshake's own event
+    # email notifications and route them with a Gmail rule into one of the
+    # labels in GMAIL_READ_LABELS, so Handshake arrives through TIER A1.
+    # Revisit only if those notifications measurably under-report.
+
+  - name: linkedin-events
+    adapter: none
+    status: out_of_scope      # login required, terms restrict automated access
+
+  - name: viva-engage-sv-studentlife
+    adapter: none
+    status: out_of_scope
+    # engage.cloud.microsoft group feed. Probed 2026-09-07 and returned a
+    # 1518-byte shell, i.e. a Microsoft 365 auth wall with the content behind
+    # SSO. Same category as Handshake, so route it through email if that group
+    # can be set to notify. There is no scraping path worth building.
+
+  # Single annual conferences, left out because a recurring poller is the wrong
+  # shape for them. They publish one set of dates a year on a marketing page, so
+  # a calendar reminder beats a scraper. Probe results kept
+  # so they are not re-tested:
+  #   cmd-it.org/tapia-conference          WordPress, but /wp/v2/types has no
+  #                                        event type, so dates live in prose
+  #   business.adobe.com/summit            read timed out with and without TLS
+  #                                        verification, needs a headless browser
+
+  - name: web-search-sweep
+    adapter: none
+    status: phase_3           # needs a query allowlist first or it floods

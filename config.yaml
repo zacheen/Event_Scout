@@ -1,0 +1,180 @@
+# Tunable pipeline settings. Secrets are NOT here (they live in .env / Actions secrets).
+# Source list lives in channels.yaml.
+
+# --- LLM -------------------------------------------------------------------
+# The scoring model, plus the local CLI that stands in for it. The CLI tier is
+# what makes a run possible with no API key at all, so leaving OPENAI_API_KEY
+# unset degrades scoring rather than disabling it.
+model: "gpt-5.6"
+reasoning_effort: "medium"
+gpt_cli: "codex"
+# --skip-git-repo-check was required back when this project was not a git repo
+# and codex refused to run outside a trusted
+# directory, failing every score with exit 1. It is a git repo again now,
+# so the flag is redundant rather than required. Kept because
+# dropping it is an untested behaviour change. --sandbox read-only is belt and
+# braces, since scoring only ever needs to read the prompt.
+gpt_cli_args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only",
+               "-c", "model=gpt-5.6-luna", "-c", "model_reasoning_effort=low"]
+# One CLI worker is one subprocess, and they share your ChatGPT rate limit.
+# Raising this clears a backlog faster but multiplies the concurrent load.
+score_workers: 5
+
+# DO NOT add a minimum-length floor for descriptions. A floor around 400 chars
+# is the usual way to reject ATS marketing teasers, a pathology events do not
+# have, and a genuinely complete event blurb is routinely shorter than that.
+# Such a floor would mark real descriptions absent and downgrade them to
+# title-only scoring.
+
+# --- Keyword gate ----------------------------------------------------------
+# min_hits 1 means a single matching term is enough to pass. That makes a LONGER
+# list more permissive and a SHORTER list stricter, which is the opposite of the
+# usual intuition, so shortening this list tightens the filter.
+min_hits: 1
+
+# APPLIES TO THE GMAIL SOURCE ONLY. Structured sources (jsonld, wordpress_rest)
+# skip the gate entirely. Two reasons, both measured. The geo
+# filter already cut Cerebral Valley from 20 events to 4, so there is no LLM cost
+# left to save; and the gate dropped 1 of those 4 on a naming technicality, since
+# "Recursive Self Improvement Hack: Co-Scientist" does not contain "hackathon".
+keyword_gate_applies_to: ["gmail_label"]
+
+# The gate reads Event.description, and GmailLabelSource puts the message body
+# there so a mail whose subject is "New events this week" is judged on what it
+# actually says. This bound is what stops one long message from matching every
+# term at once: a single newsletter issue measured 564,318 characters after
+# HTML stripping and contained nearly every candidate term, so an unbounded
+# match with min_hits 1 would admit everything.
+#
+# It governs mailbox items only, since keyword_gate_applies_to lists just
+# gmail_label. Two bounds apply in series and they differ: the source stores
+# max_description_chars of body (what the scorer reads), and the gate then looks
+# at only the first keyword_match_prefix_chars of that.
+keyword_match_scope: "subject+prefix"
+keyword_match_prefix_chars: 2000
+
+keywords:
+  # Confirmed keep. Each means a real pipeline to an employer, not a talk.
+  - "direct consideration"   # an employer campaign name, not a generic phrase
+  - "career fair"
+  - "info session"
+  - "information session"    # long form; both spellings needed
+  - "mixer"                  # catches NEU's "Co-op Poster Expo & Employer Mixer"
+  - "hack"                   # covers hack / hackathon / hackday, deliberately
+  # Left unannotated during selection, kept on a no-objection reading.
+  - "interview"
+  - "open house"
+  # On probation. Added to gather evidence, not because they are trusted. Review
+  # against per-keyword hit stats before keeping them permanently.
+  - "recruit"                # covers recruiter / recruiting / recruitment
+  - "summit"
+  - "meetup"
+  - "new grad"
+
+# Rejected, with the reason, so they do not get re-proposed later.
+#   resume, on-site, onsite, workshop, panel, conference  -> too common, they
+#     appear on events of every kind and would not discriminate
+#   networking, tech talk                                 -> employers who hire
+#     do not staff these
+#   demo day                                              -> not relevant
+#   intern, student, university, campus, co-op, northeastern -> job newsletters
+#     are saturated with these words
+#   rsvp, register, sign up, save your spot, deadline      -> present in every
+#     marketing email, so as a min_hits 1 gate they admit everything. Keep them
+#     as SCORING signals instead, never as gate terms.
+
+# The term that admitted each item is always recorded, so the probation list can
+# be judged on data rather than recollection.
+
+# --- Geography -------------------------------------------------------------
+# Anchors and radius live in channels.yaml under `geo`.
+#
+# The zone absolute times are DISPLAYED in, which has to agree with those
+# anchors or the digest states a time in a region the reader is not in. It is
+# NOT the zone anything is stored in: Event.start keeps whatever offset its
+# source used, and notifier.format_digest converts on the way out. Before
+# that conversion existed, every neu-alumni-events row was observed printing
+# 7 hours late because it carries +00:00 while Luma carries -07:00.
+display_timezone: "America/Los_Angeles"
+# How far ahead an event may start and still be reported. Raised from 30 because
+# a horizon that far out costs nothing measurable: on one full live run
+# it dropped 0 of 150 in-region events, while the LOWER bound (_START_GRACE)
+# dropped 49 that had already started. A short digest is that floor, never this
+# ceiling. Kept at all only to stop a mistyped year reaching the scorer, and set
+# generously so an event announced months ahead is seen while seats remain.
+lookahead_days: 120
+
+# --- Delivery --------------------------------------------------------------
+# One email a day, split into a closing-soon section and a general section.
+# Chosen over three separate sweeper emails because there is no push channel,
+# and three mails a day for one event reads as spam rather than urgency. The
+# send time is the workflow's cron, not a setting here.
+urgent_section_within_hours: 72
+
+# Score thresholds. rank = fit x access_value, so 1-100.
+#
+# Measured on the first full LLM run (83 events): the distribution is bimodal,
+# 24 events at rank 1-4, 13 in a grey band, 46 at 20+. Without a floor all 24
+# reached the digest, including "No Limit: Executive Poker Tournament" and a
+# student health-plan orientation, each correctly scored as irrelevant and each
+# mailed anyway, because scoring was never wired to filtering.
+digest_min_rank: 10
+
+# P0 is the only tier meant to interrupt, so it is deliberately the narrowest.
+# At the old value of 24 it captured 26 of 83 events, a third of everything, and
+# a tier that fires on a third of items is not an alarm.
+p0_min_rank: 40
+p1_min_rank: 9
+
+# An event whose start could not be determined is capped at P1 rather than
+# escalated to P0. Escalating unknowns is right when the alternative is missing
+# a deadline, but combined with a low P0 floor it turned every extraction
+# failure into an interruption.
+unknown_time_max_urgency: "P1"
+# Every digest carries an .ics attachment and nothing writes to a calendar; the
+# Gmail scope stays read-only. Stated here rather than configured, because a
+# switch nothing reads looks like a live setting.
+
+# --- Dedupe ----------------------------------------------------------------
+# Two keys, in order. First the canonical URL with utm_* stripped, which is why
+# the example below collides at all: both sources point at the same
+# cerebralvalley.ai/events URL. Then, after extraction has filled in the times,
+# the event's NAME plus the INSTANT it starts, which catches the same event
+# published under two different URLs. Compared as an instant, not as text, since
+# schema.org markup carries milliseconds where a scraped page does not.
+#
+# A start time is required for the second key. Two undated listings sharing a
+# name are far more likely a recurring series, one meetup across many nights,
+# than one event seen twice.
+# The same event legitimately arrives twice, e.g. Cerebral Valley reaches us both
+# as a labelled newsletter and as JSON-LD from cerebralvalley.ai/events. On a
+# collision prefer the structured record: its dates are typed rather than parsed
+# out of prose, which is the largest correctness risk in the whole pipeline.
+source_precedence: ["jsonld", "wordpress_rest", "newsletter", "gmail_label"]
+
+# --- Run behaviour ---------------------------------------------------------
+# What the very first run does with a backlog nothing has reported yet.
+# Modes are listed in config.FIRST_RUN_MODES; anything else fails the load.
+#
+# report_everything mails the whole in-scope backlog once. It makes recent_days
+# and require_known_publish_time below DEAD, since _seed_eligible is the only
+# reader of either -- they are left in place because switching back to
+# seed_plus_recent revives both, and a deleted key would silently take the
+# measured tuning with it.
+#
+# Reporting everything on day one is deliberate, and it is the opposite of what
+# a job or posting feed should do. Events expire, so a backlog withheld on day
+# one is not deferred, it is lost.
+first_run:
+  mode: "report_everything"
+  recent_days: 3
+  # An item whose publish time is unknown is EXCLUDED on the first run rather
+  # than assumed recent. Measured consequence: schema.org Event
+  # carries startDate and endDate but no datePublished, and none of the four
+  # JSON-LD sources emit one, so all 70 of their events sit out the first run.
+  # Only WordPress (post `date`), the newsletter archive (issue date) and Gmail
+  # (message Date header) have a real publish time. Set this false to fall back
+  # to startDate for sources that cannot report one.
+  require_known_publish_time: true
+request_timeout: 20
+user_agent: "event-scout/1.0 (+https://github.com/)"
