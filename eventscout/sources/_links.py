@@ -74,6 +74,27 @@ def is_event_link(href: str) -> bool:
     return any(hint in lowered for hint in _EVENT_HINTS)
 
 
+def tails(body: str, chars: int = 140) -> dict[str, str]:
+    """Stripped text FOLLOWING each event link, by url.
+
+    Anchors only. A bare URL in a plain-text part has no markup to end it, so
+    where its text stops is a guess, and guessing is what this returns "" for.
+
+    Keyed by raw href to match `harvest` before canonicalisation, so a caller
+    pairing the two must canonicalise both sides or neither.
+
+    First occurrence wins, matching `harvest`'s setdefault. A newsletter that
+    links one event twice states the date beside the first mention and uses a
+    bare "sign up" for the second.
+    """
+    out: dict[str, str] = {}
+    for match in _ANCHOR.finditer(body):
+        href = match.group("href")
+        if is_event_link(href) and href not in out:
+            out[href] = " ".join(strip_html(body[match.end():match.end() + chars]).split())
+    return out
+
+
 def harvest(body: str, fallback_title: str = "") -> list[tuple[str, str]]:
     """Return (url, title) for every event-looking link in an HTML or text body.
 

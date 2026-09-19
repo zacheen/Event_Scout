@@ -45,6 +45,12 @@ class State(StrEnum):
     REGISTERED = "registered"
     DISMISSED = "dismissed"
     EXPIRED = "expired"
+    # Recorded INSTEAD of a mail record, so the ledger distinguishes "full, so
+    # deliberately not sent" from both "sent" and "not sent yet". Kept out of
+    # alerted_at, which stays a timestamp: three queries test `alerted_at != ''`
+    # to mean "already told", and a marker there would make a full event count
+    # as reported and would also be copied into cleared_floor_at.
+    SOLD_OUT = "sold_out"
 
     @property
     def choosable(self) -> bool:
@@ -54,11 +60,12 @@ class State(StrEnum):
         so the CLI's allow-list and its rejection test cannot drift into
         disagreeing about the same rule.
         """
-        return self.silences_sweeper and self is not State.EXPIRED
+        return self.silences_sweeper and self not in (State.EXPIRED, State.SOLD_OUT)
 
     @property
     def silences_sweeper(self) -> bool:
-        return self in (State.SAVED, State.REGISTERED, State.DISMISSED, State.EXPIRED)
+        return self in (State.SAVED, State.REGISTERED, State.DISMISSED,
+                        State.EXPIRED, State.SOLD_OUT)
 
 
 # Fields with no sensible empty value. Everything else may legitimately be blank,
@@ -148,6 +155,7 @@ class Event:
     @property
     def has_known_start(self) -> bool:
         return bool(self.start)
+
 
     def merged_with(self, other: "Event") -> "Event":
         """Fill this event's empty fields from `other`, keeping identity fields.

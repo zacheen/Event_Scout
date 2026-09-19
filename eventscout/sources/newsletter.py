@@ -13,20 +13,24 @@ non-adjacent fields, so they are matched by pattern and paired by proximity.
 That makes this the most fragile source here, so _slug_dates raises when a
 large page yields nothing rather than reporting an empty publication.
 
-Emitted events have no start date. A newsletter states one in prose, so these
-are candidates for the LLM extractor, unlike the typed JSON-LD sources.
+A start date is read from the prose beside each link when it is stated there,
+and left empty otherwise. This is the only route to a date for an event whose
+own page the scraper cannot open: measured 2026-09-19, every tesla.com/event
+page still answers 403, and the four of five that have since closed no longer
+print their date even to a real browser, while the issue still carries all five.
 """
 from __future__ import annotations
 
 
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import ClassVar, Iterable
 
 from ..http import HttpClient
-from ..models import Coverage, Event, iso_or_empty
+from ..models import Coverage, Event, iso_or_empty, parse_iso
 from ..urls import canon_url
-from ._links import harvest
+from ._links import harvest, tails
 
 log = logging.getLogger("eventscout.newsletter")
 
@@ -42,6 +46,84 @@ _DATE_FIELD = re.compile(
 # How far either side of a slug to look for that issue's own date. Wide enough
 # to clear the intervening fields, tight enough not to borrow the next post's.
 _DATE_WINDOW = 600
+# A date stated beside a link, as "(Monday, August 31 at 5:30pm EST)". The
+# weekday is REQUIRED and is what makes the missing year safe to infer, since a
+# given month and day falls on the stated weekday in only one of the candidate
+# years. Without it this would be guessing, and PageFactExtractor._page_text
+# records what guessing a date from thin input produced last time.
+_PROSE_DATE = re.compile(
+    r"(?P<weekday>Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\s*,\s*"
+    r"(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+"
+    r"(?P<day>\d{1,2})"
+    r"(?:\s*(?:at|@)?\s*(?P<hour>\d{1,2})(?::(?P<minute>\d\d))?\s*(?P<meridiem>am|pm))?"
+    r"(?:\s*(?P<zone>E[SD]T|C[SD]T|M[SD]T|P[SD]T|UTC|GMT))?",
+    re.I)
+_MONTHS = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun",
+     "jul", "aug", "sep", "oct", "nov", "dec"), start=1)}
+# Standard offsets only. A name like "EST" is used loosely in this prose for
+# whatever New York is observing that week, so the DST variant is accepted and
+# mapped to the same city, and the error is then at most one hour rather than
+# the five that dropping the zone entirely would cost.
+_ZONES = {"est": -5, "edt": -4, "cst": -6, "cdt": -5,
+          "mst": -7, "mdt": -6, "pst": -8, "pdt": -7, "utc": 0, "gmt": 0}
+# How far ahead of its issue an event may be dated.
+#
+# MUST stay below 365, and that is the whole reason the year inference is safe
+# rather than merely usually right. The two candidate years put the same month
+# and day about 365 days apart, so a window shorter than that admits exactly one
+# of them and the weekday check never has to break a tie. At 400 it did: prose
+# reading "Tuesday, August 31" beside an issue published Monday 2026-08-31 was
+# resolved to 2027-08-31, which really is a Tuesday and sat 365 days out, so a
+# mistyped weekday became a confident date a year late instead of nothing.
+#
+# 120 clears the longest real lead by a wide margin. Measured on issue 004,
+# published 2026-08-31, the furthest event it announced was 53 days out.
+_MAX_LEAD_DAYS = 120
+
+
+def start_from_prose(text: str, published: str) -> str:
+    """An ISO start read from `text`, or "" when it does not state one.
+
+    `published` supplies the year, which this prose never prints. The stated
+    weekday then has to agree with the resulting date or "" is returned, so an
+    issue whose year is unknown, or prose that names an impossible date such as
+    "Monday, February 30", yields nothing rather than a plausible wrong answer.
+
+    A time with no zone is emitted WITHOUT an offset, deliberately. parse_iso
+    reads such a value as UTC, which is wrong by hours, but inventing the
+    reader's zone here would be wrong by the same amount and much harder to
+    notice later. Only an hours-scale error either way, so no row changes the
+    day it expires on.
+    """
+    issue = parse_iso(published)
+    match = _PROSE_DATE.search(text or "")
+    if not (issue and match):
+        return ""
+    month = _MONTHS[match.group("month")[:3].lower()]
+    day = int(match.group("day"))
+    hour, minute = 0, 0
+    if match.group("hour"):
+        hour = int(match.group("hour")) % 12
+        minute = int(match.group("minute") or 0)
+        if match.group("meridiem").lower() == "pm":
+            hour += 12
+    for year in (issue.year, issue.year + 1):
+        try:
+            when = datetime(year, month, day, hour, minute)
+        except ValueError:
+            continue    # "February 30", in either candidate year
+        if when.strftime("%a").lower() != match.group("weekday")[:3].lower():
+            continue
+        if not 0 <= (when.date() - issue.date()).days <= _MAX_LEAD_DAYS:
+            continue
+        zone = (match.group("zone") or "").lower()
+        if zone:
+            when = when.replace(tzinfo=timezone(timedelta(hours=_ZONES[zone])))
+        return iso_or_empty(when.isoformat())
+    return ""
+
+
 # An archive page this large that yields no slug means the pattern stopped
 # matching, not that the publication went quiet. Guarding on it keeps a beehiiv
 # redesign from degrading into a permanently silent source.
@@ -139,6 +221,8 @@ class NewsletterArchiveSource:
 
     def _events_from_body(self, body: str, issue: str,
                           published: str = "") -> list[Event]:
+        # Keyed by RAW href, as `tails` documents, so look up before canon_url.
+        after = tails(body)
         return [Event(
             event_uid=f"{self.kind}:{canon_url(href)}",
             title=title,
@@ -160,4 +244,9 @@ class NewsletterArchiveSource:
             # beehiiv writes these with a Z suffix, which Event rejects as
             # unnormalised; five rows in a real ledger arrived that way.
             published_at=iso_or_empty(published),
+            # From the prose beside THIS link, never the issue at large (see the
+            # description comment above). `tails`' short window plus the weekday
+            # check means a slice that ran into the next item fails closed
+            # instead of dating this event from its neighbour.
+            start=start_from_prose(after.get(href, ""), published),
         ) for href, title in harvest(body)]

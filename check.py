@@ -53,7 +53,7 @@ from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
                                 KeywordScorer, OpenAiScorer)
 from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
                                  Digest, Funnel,
-                                 _collapse, _deliver,
+                                 _at_capacity, _collapse, _deliver,
                                  _start_order,
                                  _passes_gate, _same_event_key, render_funnel,
                                  run)
@@ -62,11 +62,11 @@ from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
                                Urgency,
                                iso_or_empty)
 from eventscout.extract import PageFactExtractor
-from eventscout.sources._links import is_event_link
+from eventscout.sources._links import is_event_link, tails
 from eventscout.sources.gmail_label import GmailLabelSource
 from eventscout.sources._text import strip_html
 from eventscout.sources.jsonld import JsonLdSource
-from eventscout.sources.newsletter import NewsletterArchiveSource
+from eventscout.sources.newsletter import NewsletterArchiveSource, start_from_prose
 from eventscout.sources.wordpress import WordPressSource
 from eventscout.urls import canon_url
 
@@ -747,6 +747,96 @@ def offline() -> None:
     check("an unhandled first_run_mode raises rather than quietly seeding, "
           "since Settings can be built without load_settings",
           raised, "it fell through to the other branch")
+
+    section("store.mark_sold_out - a decision the reader made is not overwritten")
+    # The rule that keeps this safe is the state filter, and the end-to-end test
+    # below cannot see it: there every row is fresh, so every row is writable.
+    with tempfile.TemporaryDirectory() as tmp_mso:
+        db = SqliteEventStore(Path(tmp_mso) / "mso.db")
+        try:
+            keep = {}
+            for state in (State.NEW, State.SEEN, State.SAVED,
+                          State.REGISTERED, State.DISMISSED, State.EXPIRED):
+                uid = f"jsonld:https://luma.com/{state}"
+                db.upsert(_event(event_uid=uid, url=f"https://luma.com/{state}"),
+                          Score(fit=5, access_value=5, cost=1, reason="", method="m"))
+                if state is not State.NEW:
+                    db.set_state(uid, state)
+                keep[uid] = state
+            changed = db.mark_sold_out(list(keep))
+            after = dict(db._conn.execute("SELECT event_uid, state FROM events"))
+        finally:
+            db.close()
+    check("only the two undecided states are rewritten", changed == 2, f"rowcount {changed}")
+    for uid, was in keep.items():
+        want = "sold_out" if was in (State.NEW, State.SEEN) else str(was)
+        check(f"{was} -> {want}", after[uid] == want, f"got {after[uid]}")
+    # The returned count is what the funnel quotes, so it has to be the rows
+    # actually changed rather than the rows offered.
+    check("the count reports rows changed, not rows offered",
+          changed != len(keep), f"{changed} of {len(keep)} offered")
+
+    section("pipeline - a full event is recorded but never mailed")
+    # TODO 1 end to end. The unit tests above cover _at_capacity, but the
+    # wiring is what decides whether a full event reaches the digest, and it is
+    # one list comprehension away from every one of them.
+    class _FullPair:
+        kind = name = "jsonld"
+
+        def fetch(self):
+            open_one = replace(_listing("jsonld", "https://luma.com/open"),
+                               published_at=_OLD_PUB)
+            # Same listing, same score, and the ONLY difference is the marker.
+            # Anything that passes here for another reason would pass for both.
+            full = replace(_listing("jsonld", "https://luma.com/full"),
+                           title=_listing("jsonld", "https://luma.com/full").title
+                                 + " (SOLD OUT)",
+                           published_at=_OLD_PUB)
+            return [open_one, full]
+
+    with tempfile.TemporaryDirectory() as tmp_full:
+        db = SqliteEventStore(Path(tmp_full) / "full.db")
+        box = _Sections()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run([_FullPair()], db, build_geo(load_channels()),
+                    replace(_offline, first_run_mode="report_everything"),
+                    box, dry_run=False, now=_NOW)
+            mailed = {u for _, urls in box.sections for u in urls}
+            rows = dict(db._conn.execute(
+                "SELECT canonical_url, state FROM events"))
+            alerted = {r[0] for r in db._conn.execute(
+                "SELECT canonical_url FROM events WHERE alerted_at != ''")}
+        finally:
+            db.close()
+    check("the full event is not mailed, in any section including below-floor",
+          "https://luma.com/full" not in mailed, f"mailed {mailed}")
+    check("the open twin still is, so the withholding is the marker and "
+          "not the fixture", "https://luma.com/open" in mailed, f"mailed {mailed}")
+    # The point of the whole item. The ledger has to say WHY, because silence
+    # reads the same as a broken source.
+    check("the full event is still recorded, so the reason survives",
+          "https://luma.com/full" in rows, f"rows {rows}")
+    check("and its state says sold_out rather than sent or not sent",
+          rows.get("https://luma.com/full") == "sold_out", f"rows {rows}")
+    check("the mail record itself stays empty, since no mail was sent",
+          "https://luma.com/full" not in alerted, f"alerted {alerted}")
+
+    section("newsletter - the prose date reaches the Event")
+    # start_from_prose is unit tested above; this covers the one line that
+    # attaches its answer to the event, which no unit test can reach.
+    _nl = NewsletterArchiveSource("dc", "h.beehiiv.com", StubHttpClient({}))
+    _issue_body = (
+        '<a href="https://luma.com/dated">Sign up for the workshop</a> '
+        '(Monday, August 31 at 5:30pm EST) '
+        '<a href="https://luma.com/undated">Another workshop</a> (sign up soon)')
+    _made = {e.url: e.start for e in _nl._events_from_body(
+        _issue_body, "https://h.beehiiv.com/p/i", published="2026-08-31T16:23:13Z")}
+    check("an event whose prose states a date carries it",
+          _made.get("https://luma.com/dated") == "2026-08-31T17:30:00-05:00",
+          str(_made))
+    check("and one whose prose does not is left undated rather than guessed",
+          _made.get("https://luma.com/undated") == "", str(_made))
 
     section("pipeline - _deliver leaves the caller's lists alone")
     # Guards _deliver's sorted()-not-.sort() choice (see its comment): sorting
@@ -1488,6 +1578,105 @@ def offline() -> None:
         finally:
             db.close()
             local_run.DB = real_db
+
+    section("newsletter.start_from_prose - TODO 2, the only route to a Tesla date")
+    # Every tesla.com/event page answers 403 to this scraper, re-measured
+    # 2026-09-19, and the four of five that have since closed no longer print
+    # their date even to a real browser. The issue still carries all five, so
+    # this parser is the only thing standing between those rows and no date.
+    _ISSUE = "2026-08-31T16:23:13Z"       # the real publish date of issue 004
+    _real = [
+        ("Monday, August 31 at 5:30pm EST", "2026-08-31T17:30:00-05:00"),
+        ("Tuesday, September 8 at 4:30pm", "2026-09-08T16:30:00"),
+        ("Wednesday, September 16 at 5:00pm EST", "2026-09-16T17:00:00-05:00"),
+        ("Monday, September 21 at 5:30pm EST", "2026-09-21T17:30:00-05:00"),
+        ("Friday, October 23 at 6:00pm", "2026-10-23T18:00:00"),
+    ]
+    for prose, want in _real:
+        got = start_from_prose(f"({prose})", _ISSUE)
+        check(f"reads {prose!r}", got == want, f"got {got!r}, wanted {want!r}")
+    # A time with no stated zone stays offset-free rather than being assigned
+    # one. parse_iso then reads it as UTC, which is wrong by hours but never by
+    # a day, and inventing an offset would be wrong by as much while looking
+    # authoritative.
+    check("no stated zone means no invented offset",
+          start_from_prose("(Tuesday, September 8 at 4:30pm)", _ISSUE).endswith("16:30:00"),
+          start_from_prose("(Tuesday, September 8 at 4:30pm)", _ISSUE))
+    # The weekday is the whole reason inferring the missing year is safe. Each
+    # case below would otherwise produce a confident wrong date.
+    for why, prose in [
+            ("a weekday that does not match the date",
+             "(Tuesday, August 31 at 5:30pm EST)"),
+            ("a date that does not exist", "(Monday, February 30 at 5:00pm)"),
+            ("no weekday at all", "(August 31 at 5:30pm EST)"),
+            ("prose with no date in it", "(sign up now)")]:
+        check(f"returns nothing for {why}",
+              start_from_prose(prose, _ISSUE) == "",
+              f"got {start_from_prose(prose, _ISSUE)!r}")
+    check("an issue with no publish date yields nothing",
+          start_from_prose("(Monday, August 31 at 5:30pm EST)", "") == "", "")
+    # Year rollover. A December issue naming a January date means next year, and
+    # the weekday is what decides it rather than a rule about month numbers.
+    check("a date after New Year takes the following year",
+          start_from_prose("(Friday, January 8 at 6:00pm)",
+                           "2026-12-20T00:00:00+00:00").startswith("2027-01-08"),
+          start_from_prose("(Friday, January 8 at 6:00pm)", "2026-12-20T00:00:00+00:00"))
+    # _MAX_LEAD_DAYS below 365 is what makes the year unambiguous, so the two
+    # candidates can never both be in range. Asserted through the behaviour
+    # rather than the constant, since the constant alone proves nothing.
+    check("a date further ahead than a newsletter ever announces is refused",
+          start_from_prose("(Saturday, August 31 at 5:30pm)",
+                           "2024-01-01T00:00:00+00:00") == "", "")
+    check("the same prose one year on does not sneak in as next year",
+          start_from_prose("(Tuesday, August 31 at 5:30pm EST)", _ISSUE) == "",
+          "2027-08-31 is a Tuesday, and accepting it would date the event a "
+          "year late off a single mistyped weekday")
+
+    section("_links.tails - the text a date is read out of")
+    _body = ('<a href="https://luma.com/one">First</a> (Monday, August 31 at 5:30pm) '
+             '<a href="https://luma.com/two">Second</a> (Tuesday, September 8 at 4pm)')
+    _t = tails(_body)
+    check("each link gets the text that follows IT, not the body",
+          "August 31" in _t["https://luma.com/one"]
+          and "September 8" in _t["https://luma.com/two"],
+          str(_t))
+    check("a link's tail does not reach back to the previous item",
+          "August 31" not in _t["https://luma.com/two"], _t["https://luma.com/two"])
+    check("a bare url has no markup to bound its tail, so it gets none",
+          tails("see https://luma.com/three for details") == {},
+          str(tails("see https://luma.com/three for details")))
+
+    section("pipeline._at_capacity - TODO 1, a full event is not worth a slot")
+    # Against the REAL config, not a fixture list. The markers are data now, so
+    # a test carrying its own copy would pass while config.yaml said otherwise.
+    _live = load_settings()
+    check("config.yaml actually defines capacity markers",
+          len(_live.capacity_markers) > 0,
+          "an empty list silently disables the whole withholding path")
+    for why, kw in [
+            ("the measured title marker",
+             dict(title="K-AI Tech Week - Silicon Valley (SOLD OUT)")),
+            ("a marker in the description counts too",
+             dict(description="Doors at 6. This event is full.")),
+            ("hyphenated", dict(title="Mixer [SOLD-OUT]")),
+            ("case is ignored", dict(title="Mixer (Sold Out)")),
+            ("waitlist only", dict(description="Waitlist only from here."))]:
+        check(f"at_capacity sees {why}", _at_capacity(_event(**kw), _live), str(kw))
+    # The marker set has to stay narrow, which is the whole risk DECISIONS
+    # records for this method. Marketing copy is not a statement that THIS
+    # event is full, and a passed deadline is the date window's business.
+    for why, kw in [
+            ("marketing urgency is not a capacity fact",
+             dict(description="Seats sell out fast, book early")),
+            ("a sold-out OTHER event mentioned in prose",
+             dict(description="Unlike last year we did not sell out")),
+            ("a plain open listing", dict(title="Career Fair", description="All welcome"))]:
+        check(f"at_capacity ignores {why}", not _at_capacity(_event(**kw), _live), str(kw))
+
+    # SOLD_OUT silences the sweeper but is NOT something the reader can choose,
+    # because it is a fact read off the listing rather than a decision.
+    check("sold_out silences the sweeper", State.SOLD_OUT.silences_sweeper, "")
+    check("sold_out is not reader-choosable", not State.SOLD_OUT.choosable, "")
 
     section("models.Event.merged_with - caller decides precedence")
     high = _event(event_uid="a", title="Real", url="https://x/a", start="", location="SF")

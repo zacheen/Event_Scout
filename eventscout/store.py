@@ -304,6 +304,24 @@ class SqliteEventStore:
                 [(str(state), r["event_uid"]) for r in rows])
         return [(r["event_uid"], r["title"]) for r in rows]
 
+    def mark_sold_out(self, event_uids: list[str]) -> int:
+        """Record that these were withheld because the listing says they are full.
+
+        Writes `state` and NEVER `alerted_at`, so the mail record keeps meaning
+        exactly one thing and the three `alerted_at != ''` queries are untouched.
+
+        Only `new` and `seen` are overwritten, for the same reason upsert leaves
+        state alone on a repeat sighting: a reader who saved or dismissed an
+        event has made a decision, and a later listing edit must not undo it.
+        `expired` is also left, because having started is the more final fact.
+        """
+        with self._lock:
+            cursor = self._conn.executemany(
+                "UPDATE events SET state=? WHERE event_uid=? "
+                "AND state IN ('new', 'seen')",
+                [(str(State.SOLD_OUT), uid) for uid in event_uids])
+            return cursor.rowcount
+
     def mark_alerted(self, event_uids: list[str]) -> None:
         now = _now()
         with self._lock:
@@ -333,7 +351,8 @@ class SqliteEventStore:
             cur = self._conn.execute(
                 "UPDATE events SET state='expired' WHERE start != '' "
                 "AND datetime(start) < datetime(?) "
-                "AND state NOT IN ('expired','registered','saved','dismissed')",
+                "AND state NOT IN ('expired','registered','saved','dismissed',"
+                "'sold_out')",
                 (now_iso,))
         return cur.rowcount
 

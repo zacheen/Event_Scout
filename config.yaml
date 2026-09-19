@@ -53,6 +53,36 @@ keyword_gate_applies_to: ["gmail_label"]
 keyword_match_scope: "subject+prefix"
 keyword_match_prefix_chars: 2000
 
+# Phrases stating a listing is FULL (vs. the interest keywords below). Matched
+# the same way, lowercased substrings over title plus description, since no
+# source exposes a capacity field.
+#
+# A match is still scored and recorded, then withheld from the digest with
+# ledger state sold_out, so "why was I never told about X" always has an
+# answer instead of silence.
+#
+# Keep these NARROW. Each must read as a statement that THIS event is full, not
+# as marketing: "seats sell out fast" is a sales line and must not match, which
+# is why entries are phrases, not bare words. "registration is closed" counts
+# but a bare "closed" does not, since that also describes a passed deadline,
+# already handled by the date window.
+#
+# Measured 2026-09-10, the listing that motivated this read
+# "K-AI Tech Week - Silicon Valley (SOLD OUT)".
+capacity_markers:
+  - "sold out"
+  - "sold-out"                 # both spellings, sites differ
+  - "soldout"
+  - "at capacity"
+  - "at full capacity"
+  - "event is full"
+  - "this event is full"
+  - "waitlist only"            # a waitlist means the seats are gone
+  - "join the waitlist"
+  - "waitlist is open"
+  - "registration is closed"
+  - "no longer accepting"
+
 keywords:
   # Confirmed keep. Each means a real pipeline to an employer, not a talk.
   - "direct consideration"   # an employer campaign name, not a generic phrase

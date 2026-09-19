@@ -331,9 +331,23 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     # Scoring without a threshold is what put a poker tournament and a student
     # health-plan orientation into the digest: the model judged them correctly
     # and nothing acted on the judgement.
-    worth_sending = [(e, sc) for e, sc in scored if sc.rank >= settings.digest_min_rank]
-    funnel.stage(f"rank >= {settings.digest_min_rank}", len(worth_sending),
-                 f"{len(scored) - len(worth_sending)} scored but below the floor")
+    above_floor = [(e, sc) for e, sc in scored if sc.rank >= settings.digest_min_rank]
+    funnel.stage(f"rank >= {settings.digest_min_rank}", len(above_floor),
+                 f"{len(scored) - len(above_floor)} scored but below the floor")
+
+    # Withheld AFTER scoring, not gated out before it, so the ledger still holds
+    # a judgement and the reason survives. Dropping a full event earlier would
+    # answer "why was I never told about X" with silence, which is the failure
+    # the below-floor audit trail above exists to avoid.
+    #
+    # Rank cannot carry this on its own. The keyword tier takes the MAXIMUM
+    # access weight and reads no capacity marker at all, so on that tier a full
+    # event scores exactly as an open one, and that tier is what a cloud run
+    # without an API key uses for every event.
+    full: list[tuple[Event, Score]] = []
+    worth_sending: list[tuple[Event, Score]] = []
+    for event, score in above_floor:
+        (full if _at_capacity(event, settings) else worth_sending).append((event, score))
 
     # 3. persist BEFORE deciding what to send, so a crash in the notifier cannot
     #    lose the fact that these events were seen.
@@ -350,6 +364,23 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
             store.upsert(event, score, Urgency.P2,
                          keyword_hits=",".join(_hits(event, settings)))
             below_floor.append((event, score, Urgency.P2))
+    # Recorded for the same audit reason, then marked so the ledger says WHY no
+    # mail went out. upsert runs FIRST because it inserts a new row at state
+    # 'new' and never rewrites state on a repeat sighting, so marking before it
+    # would either find no row or be immediately meaningless.
+    if full:
+        for event, score in full:
+            store.upsert(event, score, Urgency.P2,
+                         keyword_hits=",".join(_hits(event, settings)))
+        # Reported from what the ledger actually changed, not from len(full).
+        # mark_sold_out leaves a row the reader already saved or dismissed
+        # alone, so the two differ exactly when a decision is being preserved,
+        # and a stage that quoted the wrong one would claim a withholding the
+        # ledger does not show.
+        marked = store.mark_sold_out([e.event_uid for e, _ in full])
+        funnel.stage("not full", len(worth_sending),
+                     f"{len(full)} withheld, the listing says sold out"
+                     + (f", {marked} newly marked" if marked != len(full) else ""))
     fresh: list[tuple[Event, Score, Urgency]] = []
     for event, score in worth_sending:
         urgency = urgency_engine.classify(event, score, now)
@@ -644,6 +675,23 @@ def _seed_eligible(event: Event, now: datetime, settings: Settings) -> bool:
         return not settings.require_known_publish_time
     when = parse_iso(event.published_at)
     return when is not None and (now - when).days <= settings.seed_recent_days
+
+
+def _at_capacity(event: Event, settings: Settings) -> bool:
+    """Does the listing SAY it is full.
+
+    Sits beside _hits and reads the same two fields, because the two answer
+    opposite halves of one question and a marker list that drifted apart from
+    the keyword list would be the same scan with different rules.
+
+    UNLIKE _hits this reads the WHOLE description rather than a bounded prefix.
+    The bound there stops a newsletter issue matching every interest term it
+    happens to mention; here the risk runs the other way, since a capacity line
+    sits at the end of a listing at least as often as the start, and a marker
+    missed means a full event is mailed as if it were open.
+    """
+    text = f"{event.title} {event.description}".lower()
+    return any(marker in text for marker in settings.capacity_markers)
 
 
 def _hits(event: Event, settings: Settings) -> list[str]:

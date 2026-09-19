@@ -33,6 +33,7 @@ FIRST_RUN_MODES = frozenset({"seed_plus_recent", "report_everything"})
 @dataclass
 class Settings:
     keywords: list[str] = field(default_factory=list)
+    capacity_markers: list[str] = field(default_factory=list)
     min_hits: int = 1
     keyword_gate_applies_to: list[str] = field(default_factory=list)
     keyword_match_prefix_chars: int = 2000
@@ -80,6 +81,9 @@ def load_settings(config_path: Path | None = None) -> Settings:
     _check_policies(raw, first)
     return Settings(
         keywords=[str(k).lower() for k in raw.get("keywords") or []],
+        # Lowercased on load like keywords, so the comparison site does not
+        # have to remember and a marker typed in capitals still matches.
+        capacity_markers=[str(k).lower() for k in raw.get("capacity_markers") or []],
         min_hits=int(raw.get("min_hits", 1)),
         keyword_gate_applies_to=list(raw.get("keyword_gate_applies_to") or []),
         keyword_match_prefix_chars=int(raw.get("keyword_match_prefix_chars", 2000)),
