@@ -86,8 +86,8 @@ class GeoFilter:
         # fallback means no city was NAMED, while these locations named
         # something that simply is not a place. That is how a remote-only event
         # from an in_region source was kept as if it were local, and why setting
-        # accept_virtual false changed nothing for it. REVIEW_FINDINGS item 9
-        # proposed rejecting outright instead, which would drop the online
+        # accept_virtual false changed nothing for it. An earlier review
+        # proposed rejecting these outright instead, which would drop the online
         # events this flag exists to keep.
         if self._is_virtual(event) or self._states_nowhere(event.location):
             return self._accept_virtual

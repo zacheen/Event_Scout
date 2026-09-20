@@ -28,9 +28,10 @@ cv_*.out
 # The case has to match the file on disk. A rule written `Todo.md` still matches
 # on Windows, where core.ignorecase is true, and silently stops matching on a
 # case-sensitive runner, which is where the file would actually be published.
-TODO.md
+Pending_fix.md
 REVIEW_FINDINGS.md
 DECISIONS.md
+Known_concern.md
 PROJECT_OVERVIEW.md
 CLAUDE.local.md
 notes/

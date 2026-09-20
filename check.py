@@ -1662,9 +1662,9 @@ def offline() -> None:
             ("case is ignored", dict(title="Mixer (Sold Out)")),
             ("waitlist only", dict(description="Waitlist only from here."))]:
         check(f"at_capacity sees {why}", _at_capacity(_event(**kw), _live), str(kw))
-    # The marker set has to stay narrow, which is the whole risk DECISIONS
-    # records for this method. Marketing copy is not a statement that THIS
-    # event is full, and a passed deadline is the date window's business.
+    # The marker set has to stay narrow, which is the whole risk of this method.
+    # Marketing copy is not a statement that THIS event is full, and a passed
+    # deadline is the date window's business.
     for why, kw in [
             ("marketing urgency is not a capacity fact",
              dict(description="Seats sell out fast, book early")),
@@ -1716,8 +1716,8 @@ def offline() -> None:
     check("only an exactly-verified entry is started", started == ["live"],
           f"started {started}")
 
-    # The inverse, which REVIEW_FINDINGS item 4 asked for and which was never
-    # added. That item's fix only corrected the one entry then claiming coverage,
+    # The inverse, which an earlier review asked for and which was never
+    # added. That fix only corrected the one entry then claiming coverage,
     # leaving nothing to stop the next one. build_sources reads four blocks of
     # channels.yaml and cannot see the rest, while `verified` is exact-matched
     # everywhere else in that file to mean "started", so the word inside an
@@ -2196,7 +2196,7 @@ def offline() -> None:
     for rule, ev, want in cases:
         check(rule, geo.keep(ev) is want)
 
-    # Recreates the REVIEW_FINDINGS item 9 case from geo.py's keep() comment.
+    # Recreates the case described in geo.py keep()'s comment.
     # Both accept_virtual values are exercised, since the bug was that
     # neither one mattered.
     nowhere = [("Remote Only", "in-region"), ("Anywhere", "in-region"),

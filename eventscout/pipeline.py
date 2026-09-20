@@ -230,8 +230,7 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     # Raised, not reported. One source failing is noise a digest can survive,
     # but EVERY source failing means the run learned nothing, and returning
     # normally there is what let a cloud run exit 0 with no digest and a green
-    # tick (REVIEW_FINDINGS item 13). Same split one level down, see
-    # source_failed's docstring above.
+    # tick. Same split one level down, see source_failed's docstring above.
     #
     # The funnel is printed FIRST so the aligned table and the coverage notes
     # survive. The message alone still names every source and its error, so this

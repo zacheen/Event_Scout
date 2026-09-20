@@ -35,6 +35,3 @@ a line exists, so check what a comment is holding up before shortening it.
 `_row_to_event` piping every timestamp back through `iso_or_empty` is the example. It
 reads as redundant, and its comment is what stops someone deleting it and breaking every
 read of a pre-gate row.
-
-What does not belong in a comment is where a value came from. A reader acts on the
-measurement, never on who supplied it.
