@@ -216,8 +216,13 @@ class EventStore(ScoreCache, Protocol):
 
     def mark_alerted(self, event_uids: list[str]) -> None: ...
 
-    def expire_past(self, now_iso: str) -> int:
+    def expire_past(self, now_iso: str, grace_hours: int) -> int:
         """Mark already-started events expired and return how many rows changed.
+
+        `grace_hours` comes from the pipeline's own start grace, so an
+        implementation must not decide for itself when an event is over; the
+        digest and the ledger disagreeing about that is a defect, not a policy
+        an implementation gets to set.
 
         The pipeline calls this on the store it was handed, so leaving it out of
         the protocol meant a second implementation could satisfy every declared

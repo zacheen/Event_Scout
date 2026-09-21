@@ -54,13 +54,13 @@ from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
 from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
                                  Digest, Funnel,
                                  _at_capacity, _collapse, _deliver,
-                                 _start_order,
+                                 _START_GRACE, _stamp_naive, _start_order,
                                  _passes_gate, _same_event_key, render_funnel,
                                  run)
 from eventscout.store import SqliteEventStore
 from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
                                Urgency,
-                               iso_or_empty)
+                               iso_or_empty, parse_iso)
 from eventscout.extract import PageFactExtractor
 from eventscout.sources._links import is_event_link, tails
 from eventscout.sources.gmail_label import GmailLabelSource
@@ -897,6 +897,164 @@ def offline() -> None:
         finally:
             db.close()
 
+    section("pipeline._stamp_naive - a stamp with no offset is not UTC")
+    # The measured row this exists for: eventbrite-sf-tech-career published
+    # "San Francisco Job Fair October 8, 2026" as "2026-10-08T00:00:00". Read
+    # as UTC that is 2026-10-07 17:00 Pacific, so expire_past retired it the
+    # evening BEFORE it happened and due_for_resweep, which takes only 'new'
+    # and 'seen', could never offer the last call.
+    _pac = display_zone("America/Los_Angeles")
+    _naive = _event(start="2026-10-08T00:00:00", end="2026-10-08T17:00:00",
+                    rsvp_deadline="2026-10-07T12:00:00",
+                    published_at="2026-09-01T00:00:00")
+    _fixed = _stamp_naive(_naive, _pac)
+    check("the summer offset is attached and the wall time is kept",
+          _fixed.start == "2026-10-08T00:00:00-07:00", f"got {_fixed.start!r}")
+    check("end and rsvp_deadline are stamped too, since both decide a deadline",
+          (_fixed.end, _fixed.rsvp_deadline) == ("2026-10-08T17:00:00-07:00",
+                                                 "2026-10-07T12:00:00-07:00"),
+          f"got {_fixed.end!r} and {_fixed.rsvp_deadline!r}")
+    # Left alone on purpose: _seed_eligible compares it in whole days, so a
+    # seven-hour shift cannot reach the boundary it turns on, and stamping it
+    # would claim a precision the publish time never had.
+    check("published_at is left naive",
+          _fixed.published_at == "2026-09-01T00:00:00",
+          f"got {_fixed.published_at!r}")
+    check("and the day no longer moves when it is rendered",
+          parse_iso(_fixed.start).astimezone(_pac).strftime("%Y-%m-%d")
+          == "2026-10-08",
+          "the job fair still shows the day before")
+    # ZoneInfo reads the offset off the DATE. A fixed -07:00 would put a
+    # January event an hour out, which is the bug display_zone already fixed on
+    # the rendering side.
+    _winter = _stamp_naive(_event(start="2026-01-15T09:00:00"), _pac)
+    check("a winter date gets standard time, not a frozen summer offset",
+          _winter.start == "2026-01-15T09:00:00-08:00", f"got {_winter.start!r}")
+    # Identity, not equality: run() counts how often this fired by asking
+    # whether the object came back unchanged.
+    _zoned = _event(start=_WHEN)
+    check("an event that already states an offset is returned unchanged",
+          _stamp_naive(_zoned, _pac) is _zoned, "it was rebuilt anyway")
+    check("and an undated event is too",
+          _stamp_naive(_event(), _pac) is not None
+          and _stamp_naive(_event(), _pac).start == "")
+
+    class _NaiveSource:
+        kind = name = "jsonld"
+
+        def fetch(self):
+            return [replace(_listing("jsonld", "https://luma.com/fair"),
+                            event_uid="jsonld:fair",
+                            start="2026-10-08T00:00:00")]
+
+    with tempfile.TemporaryDirectory() as tmp_tz:
+        db = SqliteEventStore(Path(tmp_tz) / "tz.db")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run([_NaiveSource()], db, build_geo(load_channels()), _offline,
+                    _Mailbox(), dry_run=False, now=_NOW)
+            stored = db._conn.execute(
+                "SELECT start FROM events WHERE event_uid='jsonld:fair'"
+            ).fetchone()[0]
+            check("what reaches the LEDGER carries the offset, not the run only",
+                  stored == "2026-10-08T00:00:00-07:00", f"stored {stored!r}")
+            # The whole point. SQLite compares this string itself inside
+            # expire_past, so a Python-side fix would never have reached here.
+            #
+            # 20:00 Pacific on the 7th sits BETWEEN the two readings on
+            # purpose: the naive string read as UTC started three hours ago,
+            # while the stamped one is still eleven hours away. A `now` outside
+            # that gap passes either way, which an earlier draft of this line
+            # did until a mutation showed it surviving.
+            db.expire_past("2026-10-08T03:00:00+00:00", 0)
+            state = db._conn.execute(
+                "SELECT state FROM events WHERE event_uid='jsonld:fair'"
+            ).fetchone()[0]
+            check("and SQL no longer expires it the evening before",
+                  state != "expired", f"state={state}")
+        finally:
+            db.close()
+
+    section("store.expire_past - the ledger and the digest agree on 'started'")
+    # _bound_reason keeps a started event for _START_GRACE and expire_past used
+    # to keep it for nothing, so a run could still offer an event in the digest
+    # and mark the same row expired. One constant now answers for both.
+    _grace = int(_START_GRACE.total_seconds() // 3600)
+    with tempfile.TemporaryDirectory() as tmp_gr:
+        db = SqliteEventStore(Path(tmp_gr) / "grace.db")
+        try:
+            db.upsert(_event(event_uid="fresh", url="https://x/fresh",
+                             start="2026-09-20T06:00:00+00:00"))
+            db.upsert(_event(event_uid="stale", url="https://x/stale",
+                             start="2026-09-19T20:00:00+00:00"))
+            db.expire_past("2026-09-20T12:00:00+00:00", _grace)
+            def _state(uid):
+                return db._conn.execute(
+                    "SELECT state FROM events WHERE event_uid=?",
+                    (uid,)).fetchone()[0]
+            check("an event that started 6h ago survives, as the window says",
+                  _state("fresh") != "expired", f"state={_state('fresh')}")
+            check("one that started 16h ago does not",
+                  _state("stale") == "expired", f"state={_state('stale')}")
+        finally:
+            db.close()
+    check("and the grace the pipeline hands over is the one it filters on",
+          _grace == 12, f"_START_GRACE is {_START_GRACE}")
+
+    # Through run(), because the store honouring a grace it is handed proves
+    # nothing about the pipeline handing over the right one. This is the shape
+    # that was measured: an event six hours old still sent in the digest while
+    # the same run's expire_past retired it.
+    class _JustStarted:
+        kind = name = "jsonld"
+
+        def fetch(self):
+            return [replace(_listing("jsonld", "https://luma.com/started"),
+                            event_uid="jsonld:started",
+                            start="2026-09-19T18:00:00+00:00")]
+
+    with tempfile.TemporaryDirectory() as tmp_run:
+        db = SqliteEventStore(Path(tmp_run) / "started.db")
+        box = _Mailbox()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run([_JustStarted()], db, build_geo(load_channels()), _offline,
+                    box, dry_run=False, now=_NOW)
+            state = db._conn.execute(
+                "SELECT state FROM events WHERE event_uid='jsonld:started'"
+            ).fetchone()[0]
+            check("a run that mails a just-started event does not expire it",
+                  "https://luma.com/started" in box.mailed and state != "expired",
+                  f"mailed={box.mailed}, state={state}")
+        finally:
+            db.close()
+
+    section("pipeline._deliver - a heading names the cut it actually makes")
+    # Measured on one run: the heading promised "within 72h" and was empty,
+    # while 10 of the 11 events below it started inside 72 hours, the nearest
+    # in 13. The split is Urgency.P0, which needs p0_min_rank as well as the
+    # clock, so the heading was describing a partition it does not perform.
+    with tempfile.TemporaryDirectory() as tmp_head:
+        db = SqliteEventStore(Path(tmp_head) / "head.db")
+        box = _Sections()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _deliver(Digest([(_event(start=_WHEN),
+                                  Score(fit=5, access_value=5, cost=2),
+                                  Urgency.P2)], [], [], False, []),
+                         Funnel(), db, box, _offline, dry_run=True)
+            heads = [head for head, _ in box.sections]
+            check("a P1 or P2 event is not filed under a bare time heading",
+                  not any(h.startswith("CLOSING SOON") for h in heads),
+                  f"headings {heads}")
+            check("the sections say they are picks, not a clock",
+                  heads == ["LAST CALL - starts within 72h, sent once before, "
+                            "and this is the only reminder",
+                            "TOP PICKS - closing within 72h", "OTHER PICKS"],
+                  f"headings {heads}")
+        finally:
+            db.close()
+
     section("pipeline - the last-call sweep, once and only once")
     # See run()'s step-5 comment for why the sweep exists. Run 2 below fetches
     # nothing at all -- only the ledger still remembers the event.
@@ -1421,8 +1579,8 @@ def offline() -> None:
             with contextlib.redirect_stdout(io.StringIO()):
                 _deliver(Digest(list(_pair), [], [], False, []), Funnel(), db,
                          box, _offline, dry_run=True)
-            urls = next(u for head, u in box.sections if head == "UPCOMING")
-            check("_deliver orders UPCOMING by the clock too",
+            urls = next(u for head, u in box.sections if head == "OTHER PICKS")
+            check("_deliver orders OTHER PICKS by the clock too",
                   urls == ["https://luma.com/e", "https://luma.com/l"],
                   f"order {urls}")
         finally:
@@ -1448,7 +1606,11 @@ def offline() -> None:
          "2026-09-24T02:00:00+00:00", "2026-09-23 19:00 PDT"),
         ("a UTC stamp in winter uses the standard-time offset, not a fixed one",
          "2026-01-15T02:00:00+00:00", "2026-01-14 18:00 PST"),
-        ("a naive stamp is read as UTC, the same assumption _lead_time makes",
+        # Still UTC here, and deliberately so. The notifier is a LAST resort
+        # for a naive value: _stamp_naive gave every event an offset before the
+        # ledger saw it, so anything still naive by now is a row stored before
+        # that existed, where guessing the reader's zone would rewrite history.
+        ("a naive stamp is still read as UTC, the assumption _lead_time makes",
          "2026-09-24T02:00:00", "2026-09-23 19:00 PDT"),
         ("no start at all still says so", "", "date unknown"),
     ]
@@ -1596,9 +1758,10 @@ def offline() -> None:
         got = start_from_prose(f"({prose})", _ISSUE)
         check(f"reads {prose!r}", got == want, f"got {got!r}, wanted {want!r}")
     # A time with no stated zone stays offset-free rather than being assigned
-    # one. parse_iso then reads it as UTC, which is wrong by hours but never by
-    # a day, and inventing an offset would be wrong by as much while looking
-    # authoritative.
+    # one HERE. The pipeline's _stamp_naive attaches the reader's offset later,
+    # after every adapter and the extractor, so one layer decides what "no
+    # zone" means. The note this replaced claimed the UTC reading was never
+    # wrong by a day, which "2026-10-08T00:00:00" disproves.
     check("no stated zone means no invented offset",
           start_from_prose("(Tuesday, September 8 at 4:30pm)", _ISSUE).endswith("16:30:00"),
           start_from_prose("(Tuesday, September 8 at 4:30pm)", _ISSUE))
@@ -1877,7 +2040,7 @@ def offline() -> None:
             evening = iso_or_empty("2026-09-09T17:30:00.000-07:00")
             db.upsert(_event(event_uid="tz", url="https://x/tz", start=evening))
             db.mark_alerted(["tz"])
-            db.expire_past(noon_utc)
+            db.expire_past(noon_utc, 0)
             still = db._conn.execute(
                 "SELECT state FROM events WHERE event_uid='tz'").fetchone()[0]
             check("an event six hours away is not expired by string order",
@@ -1935,7 +2098,7 @@ def offline() -> None:
                 uid = f"terminal-{state.value}"
                 db.upsert(_event(event_uid=uid, url=f"https://x/{uid}", start=past))
                 db.set_state(uid, state)
-            db.expire_past(now)
+            db.expire_past(now, 0)
             survived = {s.value for s in State
                         if db._conn.execute(
                             "SELECT state FROM events WHERE event_uid=?",

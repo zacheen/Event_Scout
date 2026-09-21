@@ -330,8 +330,15 @@ class SqliteEventStore:
                 "ELSE state END WHERE event_uid=?",
                 [(now, uid) for uid in event_uids])
 
-    def expire_past(self, now_iso: str) -> int:
+    def expire_past(self, now_iso: str, grace_hours: int) -> int:
         """Mark started events expired so the sweeper stops considering them.
+
+        `grace_hours` is how long after its start an event is still live, and
+        it is REQUIRED rather than defaulted to nothing. The pipeline's date
+        window already keeps a started event for a while, and a default here
+        would let this method and that window answer "has it started" twelve
+        hours apart, which is exactly the split that put an event in the digest
+        and marked it expired in the same run.
 
         The exclusion list is State.silences_sweeper spelled out in SQL. It has
         to stay in step: an event the user dismissed and then let start would
@@ -350,10 +357,10 @@ class SqliteEventStore:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE events SET state='expired' WHERE start != '' "
-                "AND datetime(start) < datetime(?) "
+                "AND datetime(start) < datetime(?, ?) "
                 "AND state NOT IN ('expired','registered','saved','dismissed',"
                 "'sold_out')",
-                (now_iso,))
+                (now_iso, f"-{grace_hours} hours"))
         return cur.rowcount
 
     def get_cached_score(self, event_uid: str, model_tag: str) -> Score | None:

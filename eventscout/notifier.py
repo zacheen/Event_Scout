@@ -13,25 +13,10 @@ from email.message import EmailMessage
 
 from zoneinfo import ZoneInfo
 
-from .models import parse_iso, Event
+# Re-exported, not merely imported: every notifier resolves the reader's zone
+# at construction, and check.py reaches for it here.
+from .models import display_zone, parse_iso, Event
 from .protocols import Section
-
-
-def display_zone(name: str) -> ZoneInfo:
-    """The zone absolute times are RENDERED in. Resolved once, at construction.
-
-    Needed because the raw string was being sliced for display, which is only
-    right when the source happens to store the reader's own offset. Measured
-    2026-09-18 on the live ledger: Luma and Gmail events carry -07:00 and
-    printed correctly, while every neu-alumni-events row carries +00:00 and
-    printed 7 hours late, one of them on the wrong DAY
-    (2026-09-24T02:00:00+00:00 shown as "2026-09-24 02:00" for an event that
-    starts 2026-09-23 19:00 Pacific).
-
-    An unknown name raises here rather than at send time, since the alternative
-    is a digest full of times in a zone nobody chose.
-    """
-    return ZoneInfo(name)
 
 
 def _ics_stamp(value: str) -> str:

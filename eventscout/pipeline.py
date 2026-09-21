@@ -7,12 +7,13 @@ the run says WHICH stage the events disappeared at.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Hashable, NamedTuple
+from zoneinfo import ZoneInfo
 
 from .config import Settings
-from .models import parse_iso, Event, Score, Urgency
+from .models import display_zone, iso_or_empty, parse_iso, Event, Score, Urgency
 from .protocols import (BoundedSource, EventFilter, EventScorer, EventSource, EventStore,
                         Extractor, Notifier, Section, UrgencyEngine)
 from .scoring import DeadlineUrgency, build_scorer
@@ -273,11 +274,30 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
                          f"of {len(thin)} thin items: {got_date} gained a date, "
                          f"{got_place} a location")
 
+    # The one point every adapter AND the extractor have already run, which is
+    # why the offset is attached here rather than in each source. A stamp with
+    # no offset is read as UTC by parse_iso and, decisively, by SQLite inside
+    # expire_past and due_for_resweep, and no Python-side fallback can reach
+    # those two. Measured on the live ledger: a San Francisco job fair stored as
+    # "2026-10-08T00:00:00" landed at 2026-10-07 17:00 Pacific, so the row
+    # expired the evening BEFORE the event and could never earn a last call.
+    #
+    # Reported on stdout rather than as a funnel stage, because a stage means a
+    # delta between two of the same set and this one drops nothing.
+    zone = display_zone(settings.display_timezone)
+    stamped = [_stamp_naive(e, zone) for e in deduped]
+    unzoned = sum(1 for was, now_ in zip(deduped, stamped) if was is not now_)
+    if unzoned:
+        print(f"{unzoned} event(s) stated no UTC offset; read as "
+              f"{settings.display_timezone}")
+    deduped = stamped
+
     # Same event, different URL. Two sources can each publish their own link to
     # one real event (a Luma page and the host's own page), and the URL pass
     # above cannot see that. Runs AFTER extraction on purpose: the tiers most
     # likely to carry a duplicate arrive with no start at all, and this key
-    # needs one.
+    # needs one. Runs after the stamp too, since _same_event_key compares
+    # instants and a naive copy of a zoned listing would miss its own twin.
     before = len(deduped)
     deduped, merged_away = _collapse(deduped, rank, _same_event_key)
     if before != len(deduped):
@@ -415,7 +435,10 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     cleared = ([e.event_uid for e, _ in worth_sending]
                + [a.event_uid for e, _ in worth_sending
                   for a in merged_away.get(e.event_uid, ())])
-    store.expire_past(now.isoformat())
+    # The same grace _bound_reason applies, passed rather than re-stated, so
+    # the ledger cannot call an event over while the digest still offers it.
+    store.expire_past(now.isoformat(),
+                      int(_START_GRACE.total_seconds() // 3600))
     store.save()
     funnel.stage("all in scope" if report_all else "new since last run", len(fresh))
 
@@ -548,7 +571,7 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
     rest = [t for t in to_send if t[2] is not Urgency.P0]
     rest.sort(key=lambda t: (-t[1].rank, _start_order(t)))
     reminders = sorted(reminders, key=_start_order)
-    # Its own section, not folded into CLOSING SOON: these were sent once
+    # Its own section, not folded into TOP PICKS: these were sent once
     # already, so the reader needs to see why the same event is back.
     #
     # The heading says what the ledger actually knows. It cannot say "you have
@@ -559,8 +582,14 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
     sections: list[Section] = [
         (f"LAST CALL - starts within {settings.urgent_hours}h, "
          "sent once before, and this is the only reminder", reminders),
-        (f"CLOSING SOON (within {settings.urgent_hours}h)", urgent),
-        ("UPCOMING", rest)]
+        # Named for the rank cut, not for the clock. These two split on
+        # Urgency.P0, which needs a rank of p0_min_rank as well as a start
+        # inside urgent_hours, so a heading promising only "within 72h" was
+        # read as a time partition it does not perform. Measured on one run:
+        # the 72h heading was empty while 10 of the 11 events under OTHER
+        # PICKS started inside 72 hours, the nearest in 13.
+        (f"TOP PICKS - closing within {settings.urgent_hours}h", urgent),
+        ("OTHER PICKS", rest)]
     if below_floor:
         below_floor = sorted(below_floor,
                              key=lambda t: (-t[1].rank, _start_order(t)))
@@ -647,6 +676,35 @@ def _safe_score(scorer: EventScorer, event: Event) -> Score | None:
 _START_GRACE = timedelta(hours=12)
 _STARTED = "started"
 _TOO_FAR = "far"
+
+
+def _stamp_naive(event: Event, zone: ZoneInfo) -> Event:
+    """`event` with every unzoned lifecycle timestamp read as `zone`, not UTC.
+
+    The wall time is kept and an offset is attached, so a source writing
+    "18:00" is taken to mean 18:00 where the reader is. ZoneInfo derives the
+    offset from the date, so a January event gets standard time rather than the
+    summer one a fixed offset would freeze in.
+
+    start, end and rsvp_deadline only. published_at is left naive because no
+    lifecycle query reads it and _seed_eligible compares it in whole days,
+    where a seven-hour shift cannot reach the boundary that setting turns on.
+
+    Returns the SAME object when nothing changed, which is what lets the caller
+    count how often this fired without re-testing every field.
+    """
+    patch = {}
+    for field in ("start", "end", "rsvp_deadline"):
+        text = getattr(event, field)
+        if not text:
+            continue
+        # Cannot raise: Event.__post_init__ has already rejected any value
+        # iso_or_empty could not re-emit, and iso_or_empty resolves "Z" itself,
+        # so nothing reaching here carries a suffix fromisoformat would refuse.
+        when = datetime.fromisoformat(text)
+        if when.tzinfo is None:
+            patch[field] = iso_or_empty(when.replace(tzinfo=zone).isoformat())
+    return replace(event, **patch) if patch else event
 
 
 def _bound_reason(event: Event, now: datetime, horizon: datetime) -> str | None:

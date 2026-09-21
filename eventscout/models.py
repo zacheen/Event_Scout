@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from enum import StrEnum
+from zoneinfo import ZoneInfo
 
 from .urls import canon_url
 
@@ -187,6 +188,31 @@ class Event:
         return replace(self, **patch) if patch else self
 
 
+def display_zone(name: str) -> ZoneInfo:
+    """The project's one local zone, resolved once and eagerly.
+
+    Two callers with opposite jobs. The notifier RENDERS absolute times in it,
+    because the raw string was being sliced for display, which is only right
+    when the source happens to store the reader's own offset. Measured on the
+    live ledger: Luma and Gmail events carry -07:00 and printed correctly,
+    while every neu-alumni-events row carries +00:00 and printed 7 hours late,
+    one of them on the wrong DAY (2026-09-24T02:00:00+00:00 shown as
+    "2026-09-24 02:00" for an event that starts 2026-09-23 19:00 Pacific).
+    The pipeline's _stamp_naive READS a source's unzoned time as it, which is
+    the same zone for the opposite reason, an input assumption rather than an
+    output format.
+
+    Here rather than in notifier.py, which is where it started: pipeline.py
+    depends only on protocols, config and this module, so reaching into the
+    email adapter for a pure ZoneInfo lookup would have been the one import
+    binding the core pass to one output channel.
+
+    An unknown name raises here rather than at send time, since the alternative
+    is a digest full of times in a zone nobody chose.
+    """
+    return ZoneInfo(name)
+
+
 def parse_iso(value: str) -> datetime | None:
     """An Event timestamp as an instant, or None when it is not one.
 
@@ -223,7 +249,9 @@ def iso_or_empty(value: object) -> str:
     # LOCAL, which was never true: geo.py parses no dates at all, and every
     # urgency path goes through parse_iso. The consequence to remember is that a
     # naive value and a parse_iso instant agree only when the source really did
-    # mean UTC.
+    # mean UTC, which is why the pipeline's _stamp_naive attaches an offset
+    # before anything is stored: SQLite makes the same UTC assumption inside
+    # expire_past, and no Python-side fallback can reach that comparison.
     try:
         return datetime.fromisoformat(
             text.replace("Z", "+00:00")).isoformat(timespec="seconds")
