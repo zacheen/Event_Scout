@@ -6,12 +6,40 @@ half-valid Event that later stages treat as trustworthy.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 from .urls import canon_url
+
+_DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def is_date_only(value: str) -> bool:
+    """Did the source give a DAY rather than a moment?
+
+    "2026-10-08" yes, "2026-10-08T00:00:00" no: a source that spelled out
+    midnight meant midnight, and only the bare form says the time is unknown.
+    Shared rather than re-tested at each caller, because iso_or_empty decides
+    what survives normalisation and the pipeline decides what it turns into,
+    and a second copy of the pattern is how those two would drift.
+
+    Shape AND validity, because neither test alone is enough. The pattern is
+    what separates a date from a spelled-out midnight, which fromisoformat
+    accepts equally; fromisoformat is what rejects "2026-13-45", which the
+    pattern matches and SQLite then reads as NULL, dropping the row out of
+    every lifecycle query at once (see iso_or_empty).
+    """
+    text = (value or "").strip()
+    if not _DATE_ONLY.fullmatch(text):
+        return False
+    try:
+        datetime.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
 
 
 class AttendanceMode(StrEnum):
@@ -103,6 +131,20 @@ class Event:
     # geo filter can tell "states no location" apart from "is elsewhere". Not
     # persisted: a later run re-fetches and decides again.
     page_unreadable: bool = False
+    # The source gave a date and no time, so start holds local midnight and
+    # the event is not over until the day is.
+    #
+    # PERSISTED, unlike page_unreadable, and the asymmetry is expire_past
+    # rather than importance. That runs as one SQL scan over EVERY stored row,
+    # not just the ones this run re-fetched, so a row whose source dropped it
+    # this cycle still has to answer "was this all day" from what the ledger
+    # holds. page_unreadable has no cross-run batch reader, so re-deciding it
+    # from scratch each run is free and storing it would only let a stale
+    # answer outlive the attempt that produced it.
+    #
+    # Set by the pipeline's _stamp_naive, the one place that sees the bare
+    # date before it becomes an instant.
+    all_day: bool = False
 
     def __post_init__(self):
         # JSON nulls (e.g. "location": null) survive .get(key, "") since the key
@@ -166,6 +208,17 @@ class Event:
         sources, fold left in descending precedence,
         `best.merged_with(second).merged_with(third)`: each step only fills
         gaps, so a higher-precedence value is never overwritten by a lower one.
+
+        ONE exception, and it is deliberate. start, end and all_day describe a
+        single occurrence, so taking a start means taking the end and the flag
+        that came with it, EVEN IF a higher-precedence source already supplied
+        an end. Reproduced over a three-source fold: a middle source knowing
+        only an end ("the event finishes at 3pm", no date) loses that end to
+        the lowest-precedence source's complete occurrence. Kept that way
+        because an end belonging to a start we did NOT take is not a better
+        fact about this event, it is a fact about a different one, and pairing
+        it with the start we did take is how an all-day event on the 8th ends
+        up claiming to run until the 30th.
         """
         # page_unreadable is excluded because it is not a fact ABOUT the event,
         # it is the result of one attempt to read one URL, and "False" means
@@ -181,10 +234,21 @@ class Event:
             f.name: getattr(other, f.name)
             for f in fields(self)
             if f.name not in ("event_uid", "url", "source", "source_kind",
-                                    "page_unreadable")
+                                    "page_unreadable", "all_day")
             and not getattr(self, f.name)
             and getattr(other, f.name)
         }
+        # start, end and all_day are one occurrence, not three facts, so they
+        # move together or not at all. Merged independently each does its own
+        # damage: a winner with a real time takes a loser's all_day and claims
+        # to run all day, a winner filling an empty start from an all-day loser
+        # drops the flag and reads as midnight, and a timed winner with no end
+        # inherits an all-day loser's 23:59:59, which _stamp_naive SYNTHESISED
+        # for a day it no longer describes.
+        if "start" in patch:
+            patch["all_day"], patch["end"] = other.all_day, other.end
+        elif other.all_day:
+            patch.pop("end", None)
         return replace(self, **patch) if patch else self
 
 
@@ -242,6 +306,14 @@ def iso_or_empty(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    # A pure calendar date stays one. Expanding "2026-10-08" to midnight is
+    # what threw away the only signal that an event is ALL DAY: measured, all
+    # 18 nodes on the eventbrite feed state startDate and endDate as bare
+    # dates, so the whole tier arrived claiming to start at 00:00. SQLite reads
+    # a bare date natively, so this costs nothing the docstring above promises,
+    # and the pipeline's _stamp_naive is what turns it into an instant.
+    if is_date_only(text):
+        return text
     # Re-emitted WITHOUT forcing a timezone: a source that stated none is not
     # improved by pretending it meant UTC here. parse_iso is what fills one in
     # for callers needing an instant, and it assumes UTC. An earlier version of

@@ -13,7 +13,8 @@ from typing import Callable, Hashable, NamedTuple
 from zoneinfo import ZoneInfo
 
 from .config import Settings
-from .models import display_zone, iso_or_empty, parse_iso, Event, Score, Urgency
+from .models import (display_zone, is_date_only, iso_or_empty, parse_iso,
+                     Event, Score, Urgency)
 from .protocols import (BoundedSource, EventFilter, EventScorer, EventSource, EventStore,
                         Extractor, Notifier, Section, UrgencyEngine)
 from .scoring import DeadlineUrgency, build_scorer
@@ -690,6 +691,12 @@ def _stamp_naive(event: Event, zone: ZoneInfo) -> Event:
     lifecycle query reads it and _seed_eligible compares it in whole days,
     where a seven-hour shift cannot reach the boundary that setting turns on.
 
+    A bare date is the other case, and it is not the same as midnight. The
+    source said WHICH DAY and nothing more, so it becomes local midnight with
+    all_day set, and the end becomes the last second of that same local day.
+    Midnight alone would be read as a midnight start, and the row would be
+    retired at midday by expire_past even with the start grace.
+
     Returns the SAME object when nothing changed, which is what lets the caller
     count how often this fired without re-testing every field.
     """
@@ -704,6 +711,24 @@ def _stamp_naive(event: Event, zone: ZoneInfo) -> Event:
         when = datetime.fromisoformat(text)
         if when.tzinfo is None:
             patch[field] = iso_or_empty(when.replace(tzinfo=zone).isoformat())
+    if is_date_only(event.start):
+        day = datetime.fromisoformat(event.start).replace(tzinfo=zone)
+        patch["all_day"] = True
+        patch["start"] = iso_or_empty(day.isoformat())
+        # The end is the last second of the LAST day, which is not always the
+        # first. Every node on the one feed measured states the same bare date
+        # on both sides, and taking that for a rule would silently cut a
+        # multi-day conference down to its opening day. A same-date or missing
+        # end is overwritten rather than filled, because stamping it would
+        # otherwise land it exactly on the start and build_ics would emit a
+        # zero-length VEVENT. A third shape is deliberately flattened: an end
+        # carrying a real time beside a date-only start mixes two precisions,
+        # and the start is the side that says what the source actually knew,
+        # so the day wins and the stated time is dropped.
+        last = event.end if is_date_only(event.end) else event.start
+        patch["end"] = iso_or_empty(
+            datetime.fromisoformat(max(last, event.start))
+            .replace(tzinfo=zone, hour=23, minute=59, second=59).isoformat())
     return replace(event, **patch) if patch else event
 
 
@@ -721,7 +746,15 @@ def _bound_reason(event: Event, now: datetime, horizon: datetime) -> str | None:
     when = parse_iso(event.start) if event.start else None
     if when is None:
         return None
-    if when < now - _START_GRACE:
+    # An all-day event is over when its LAST day is, not when its midnight
+    # start was. Reads the end _stamp_naive synthesised, the same column
+    # expire_past reads, so the filter and the ledger cannot disagree about
+    # when something is finished and a multi-day listing survives its opening
+    # day in both. A stated end is not consulted for anything else; see
+    # expire_past for the measurement that rules it out.
+    over = parse_iso(event.end) if event.all_day and event.end else None
+    over = over or when
+    if over < now - _START_GRACE:
         return _STARTED
     return _TOO_FAR if when > horizon else None
 

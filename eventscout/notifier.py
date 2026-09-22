@@ -39,17 +39,33 @@ def build_ics(events: list[Event]) -> str:
         start = _ics_stamp(event.start)
         if not start:
             continue
-        # An hour after the start, for an event that states no end. Reaching
-        # this line means _ics_stamp already parsed event.start successfully,
-        # so parse_iso cannot return None here.
-        end = _ics_stamp(event.end) or _ics_stamp(
-            (parse_iso(event.start) + timedelta(hours=1)).isoformat())
+        if event.all_day:
+            # RFC 5545 3.6.1: an all-day event is a DATE value, and its DTEND
+            # is EXCLUSIVE, so a one-day event ends on the following date.
+            # Emitting the stored instants instead would put a 07:00-to-07:00
+            # timed block in the calendar, which is the same false precision
+            # the digest stopped printing, moved to another channel.
+            # Read in the offset the value carries, never converted to UTC.
+            # _stamp_naive stored local midnight, so the date is already the
+            # local one and converting would walk it back a day.
+            first = parse_iso(event.start)
+            last = parse_iso(event.end or event.start)
+            dt_start = f"DTSTART;VALUE=DATE:{first.strftime('%Y%m%d')}"
+            dt_end = ("DTEND;VALUE=DATE:"
+                      f"{(last + timedelta(days=1)).strftime('%Y%m%d')}")
+        else:
+            # An hour after the start, for an event that states no end.
+            # Reaching this line means _ics_stamp already parsed event.start
+            # successfully, so parse_iso cannot return None here.
+            end = _ics_stamp(event.end) or _ics_stamp(
+                (parse_iso(event.start) + timedelta(hours=1)).isoformat())
+            dt_start, dt_end = f"DTSTART:{start}", f"DTEND:{end}"
         lines += [
             "BEGIN:VEVENT",
             f"UID:{event.event_uid}",
             f"DTSTAMP:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTSTART:{start}",
-            f"DTEND:{end}",
+            dt_start,
+            dt_end,
             f"SUMMARY:{_escape(event.title)}",
             f"LOCATION:{_escape(event.location)}",
             f"DESCRIPTION:{_escape(event.url)}",
@@ -111,8 +127,15 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
             # convert anything for a reader who is travelling, and the .ics
             # attachment beside it carries UTC for the calendar to convert, so
             # an unlabelled wall clock was the one ambiguity left here.
-            when = (start.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
-                    if start else "date unknown")
+            # No clock for an all-day event. Its start is local midnight by
+            # construction, so printing "00:00" would state a time the source
+            # never gave and send a reader to a job fair at midnight.
+            if start is None:
+                when = "date unknown"
+            elif event.all_day:
+                when = f"{start.astimezone(zone).strftime('%Y-%m-%d')} (all day)"
+            else:
+                when = start.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
             if lead:
                 when = f"{when} ({lead})"
             where = event.location or ("online" if event.is_virtual else "location unknown")

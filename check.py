@@ -46,21 +46,21 @@ from eventscout.geo import Anchor, GeoFilter
 from eventscout.http import (HttpClient, StubHttpClient, UrllibHttpClient,
                              _decode_body)
 from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
-                                 display_zone, format_digest)
+                                 build_ics, display_zone, format_digest)
 from eventscout import pipeline, protocols
 from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
                                 _parse_score,
                                 KeywordScorer, OpenAiScorer)
 from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
                                  Digest, Funnel,
-                                 _at_capacity, _collapse, _deliver,
+                                 _at_capacity, _bound_reason, _collapse, _deliver,
                                  _START_GRACE, _stamp_naive, _start_order,
                                  _passes_gate, _same_event_key, render_funnel,
                                  run)
 from eventscout.store import SqliteEventStore
 from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
                                Urgency,
-                               iso_or_empty, parse_iso)
+                               is_date_only, iso_or_empty, parse_iso)
 from eventscout.extract import PageFactExtractor
 from eventscout.sources._links import is_event_link, tails
 from eventscout.sources.gmail_label import GmailLabelSource
@@ -975,11 +975,192 @@ def offline() -> None:
         finally:
             db.close()
 
+    section("all-day - a source that gave a DAY did not give a midnight")
+    # The grace both this section and the next one measure against, read from
+    # the pipeline rather than restated, for the same reason expire_past takes
+    # it as an argument.
+    _grace = int(_START_GRACE.total_seconds() // 3600)
+    # Measured on the live eventbrite feed: all 18 nodes state startDate and
+    # endDate as bare dates, "2026-10-08" for "San Francisco Job Fair October
+    # 8, 2026". Expanded to midnight, that row printed a 00:00 start, and the
+    # start grace then retired it at midday on the day of the fair.
+    check("iso_or_empty keeps a bare date bare, since midnight is not a day",
+          iso_or_empty("2026-10-08") == "2026-10-08",
+          f"got {iso_or_empty('2026-10-08')!r}")
+    check("and a spelled-out midnight stays a moment",
+          not is_date_only("2026-10-08T00:00:00"), "it was read as a day")
+    check("an impossible date is still rejected, shape alone is not validity",
+          iso_or_empty("2026-13-45") == "", f"got {iso_or_empty('2026-13-45')!r}")
+
+    _allday = _stamp_naive(_event(start="2026-10-08", end="2026-10-08"), _pac)
+    check("a bare date becomes local midnight and is flagged all day",
+          (_allday.start, _allday.all_day) == ("2026-10-08T00:00:00-07:00", True),
+          f"got {_allday.start!r}, all_day={_allday.all_day}")
+    # Without this build_ics emits DTSTART == DTEND, because the source states
+    # the same bare date on both sides and both stamp to the same instant.
+    check("and the end becomes the last second of that local day",
+          _allday.end == "2026-10-08T23:59:59-07:00", f"got {_allday.end!r}")
+    check("a timed event is not flagged",
+          _stamp_naive(_event(start="2026-10-08T09:00:00"), _pac).all_day is False)
+    # A multi-day conference is the case one feed's start==end does not cover.
+    # Taking that for a rule would cut it down to its opening day.
+    _multi = _stamp_naive(_event(start="2026-10-08", end="2026-10-10"), _pac)
+    check("a multi-day all-day event keeps its LAST day, not its first",
+          (_multi.start, _multi.end) == ("2026-10-08T00:00:00-07:00",
+                                         "2026-10-10T23:59:59-07:00"),
+          f"got {_multi.start!r} -> {_multi.end!r}")
+    check("and an end that precedes the start does not shorten it",
+          _stamp_naive(_event(start="2026-10-08", end="2026-10-01"), _pac).end
+          == "2026-10-08T23:59:59-07:00", "the end went backwards")
+
+    _shown_allday = format_digest(
+        [("S", [(_allday, Score(fit=5, access_value=5, cost=2), Urgency.P2)])],
+        _pac, now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    check("the digest prints the day and refuses to invent a clock time",
+          "2026-10-08 (all day)" in _shown_allday and "00:00" not in _shown_allday,
+          f"line: {[l for l in _shown_allday.splitlines() if 'when:' in l]}")
+    # RFC 5545 3.6.1: a DATE value, and DTEND is exclusive, so a one-day event
+    # ends on the following date. Emitting the stored instants would put a
+    # 07:00-to-07:00 timed block in the calendar, which is the same false
+    # precision the digest line above stopped printing.
+    _ics = build_ics([_allday])
+    check("the calendar says all day too, not a 07:00 block in UTC",
+          "DTSTART;VALUE=DATE:20261008" in _ics
+          and "DTEND;VALUE=DATE:20261009" in _ics, _ics)
+    check("and a multi-day one ends the day after its last",
+          "DTEND;VALUE=DATE:20261011" in build_ics([_multi]), build_ics([_multi]))
+    check("while a timed event still gets an instant, not a date",
+          "DTSTART:20261008T160000Z" in build_ics(
+              [_stamp_naive(_event(start="2026-10-08T09:00:00"), _pac)]),
+          build_ics([_stamp_naive(_event(start="2026-10-08T09:00:00"), _pac)]))
+
+    # all_day is a property OF start, so merged_with must move the two
+    # together or a winner with a real time inherits the flag.
+    _timed = _event(event_uid="t", url="https://x/t", start="2026-10-08T09:00:00-07:00")
+    check("merging does not paste all_day onto an event that states a time",
+          _timed.merged_with(_allday).all_day is False, "it claimed to run all day")
+    # The end is synthesised for a day this winner does not describe, so it
+    # must not fill the winner's gap either. Only start moving takes the whole
+    # occurrence across.
+    check("nor the 23:59:59 end that was synthesised alongside it",
+          _timed.merged_with(_allday).end == "",
+          f"got {_timed.merged_with(_allday).end!r}")
+    _timed_end = _event(event_uid="te", url="https://x/te",
+                        start="2026-10-08T09:00:00-07:00")
+    check("but a real end from a timed source still fills a gap",
+          _timed.merged_with(replace(_timed_end,
+                                     end="2026-10-08T11:00:00-07:00")).end
+          == "2026-10-08T11:00:00-07:00", "gap filling was broken for everyone")
+    _blank = _event(event_uid="b", url="https://x/b")
+    check("but an empty start takes the flag along with the date it fills",
+          (_blank.merged_with(_allday).start, _blank.merged_with(_allday).all_day)
+          == ("2026-10-08T00:00:00-07:00", True),
+          f"got {_blank.merged_with(_allday).start!r}, "
+          f"all_day={_blank.merged_with(_allday).all_day}")
+    # An end with no start is the only shape where taking other's start does
+    # NOT already take its end through gap filling, so it is the case that
+    # proves the occurrence moves as a unit rather than field by field.
+    _orphan_end = _event(event_uid="o", url="https://x/o",
+                         end="2026-11-30T23:00:00-08:00")
+    check("and an orphan end is replaced by the occurrence it is given",
+          _orphan_end.merged_with(_allday).end == "2026-10-08T23:59:59-07:00",
+          f"kept {_orphan_end.merged_with(_allday).end!r}, a month after the start")
+    # The documented exception to merged_with's precedence contract, pinned
+    # over the three-source fold where it actually shows. The MIDDLE source
+    # knows only an end; the lowest-precedence source supplies the whole
+    # occurrence and takes that end with it. Keeping the middle one would pair
+    # an end in November with a start on 8 October.
+    # The general form of the same rule, which the two cases above only imply:
+    # taking a start replaces the end even when the incoming occurrence states
+    # none, because an end kept from a start we did not take would describe
+    # something else. Blank is the honest answer, not the old value.
+    _endless = _event(event_uid="ne", url="https://x/ne",
+                      start="2026-10-08T09:00:00-07:00")
+    check("taking a start with no end leaves no end, rather than the orphan's",
+          _orphan_end.merged_with(_endless).end == "",
+          f"kept {_orphan_end.merged_with(_endless).end!r}")
+
+    _blank_top = _event(event_uid="p0", url="https://x/p0")
+    _folded = _blank_top.merged_with(_orphan_end).merged_with(_allday)
+    check("a fold lets a complete occurrence replace a higher-ranked orphan end",
+          (_folded.start, _folded.end, _folded.all_day)
+          == ("2026-10-08T00:00:00-07:00", "2026-10-08T23:59:59-07:00", True),
+          f"got {_folded.start!r} -> {_folded.end!r}, all_day={_folded.all_day}")
+
+    with tempfile.TemporaryDirectory() as tmp_ad:
+        db = SqliteEventStore(Path(tmp_ad) / "allday.db")
+        try:
+            db.upsert(_allday)
+            check("the column persists",
+                  bool(db._conn.execute(
+                      "SELECT all_day FROM events").fetchone()[0]),
+                  "upsert did not write it")
+            # Through due_for_resweep, the only caller of _row_to_event, so
+            # the READ path is covered too: writing the column and dropping it
+            # on the way back out looks identical from the table.
+            db.mark_alerted([_allday.event_uid])
+            _due = db.due_for_resweep(48, "2026-10-07T00:00:00+00:00")
+            check("and rehydrating an Event brings the flag back with it",
+                  len(_due) == 1 and _due[0].all_day is True,
+                  f"got {[(e.event_uid, e.all_day) for e in _due]}")
+            # 16:00 Pacific on the day of the fair, chosen so the two answers
+            # differ. The start is 07:00 UTC and the grace puts the cutoff at
+            # 11:00 UTC, so an unshifted row is already past it while the
+            # shifted one is not. A `now` of 19:00 UTC, the obvious "midday",
+            # lands the cutoff exactly ON the start and passes either way,
+            # which is what a mutation caught.
+            db.expire_past("2026-10-08T23:00:00+00:00", _grace)
+            state = db._conn.execute("SELECT state FROM events").fetchone()[0]
+            check("and SQL keeps it alive at midday on the day itself",
+                  state != "expired", f"state={state}")
+            db.expire_past("2026-10-09T20:00:00+00:00", _grace)
+            state = db._conn.execute("SELECT state FROM events").fetchone()[0]
+            check("while the day after, past the grace, it is over",
+                  state == "expired", f"state={state}")
+        finally:
+            db.close()
+
+    # Through the LIFECYCLE, not just the stamp. _stamp_naive and build_ics
+    # both understood a date range while expire_past and _bound_reason only
+    # knew the start, so a three-day conference was retired on its second
+    # morning. Reading the synthesised end in both is what closes that.
+    with tempfile.TemporaryDirectory() as tmp_md:
+        db = SqliteEventStore(Path(tmp_md) / "multi.db")
+        try:
+            db.upsert(_multi)
+            def _md_state(now):
+                db.expire_past(now, _grace)
+                return db._conn.execute("SELECT state FROM events").fetchone()[0]
+            check("a three-day event is still live on its second day",
+                  _md_state("2026-10-09T23:00:00+00:00") != "expired",
+                  "it was retired on day two")
+            check("and on its third",
+                  _md_state("2026-10-10T23:00:00+00:00") != "expired",
+                  "it was retired on the closing day")
+            check("but not two days after the last one",
+                  _md_state("2026-10-12T23:00:00+00:00") == "expired",
+                  "it outlived its own range")
+        finally:
+            db.close()
+    _day2 = datetime(2026, 10, 9, 23, tzinfo=timezone.utc)
+    check("_bound_reason keeps a multi-day event on its second day too",
+          _bound_reason(_multi, _day2, _day2 + timedelta(days=120)) is None,
+          "the date window cut it a day in")
+    # Same shift, same instant, same reason, now on the filter side, so the
+    # filter and the ledger cannot disagree.
+    _pm = datetime(2026, 10, 8, 23, tzinfo=timezone.utc)
+    check("_bound_reason keeps an all-day event through its own day",
+          _bound_reason(_allday, _pm, _pm + timedelta(days=120)) is None,
+          "the date window cut it while the doors were open")
+    check("and a timed event that started 16h ago is still cut",
+          _bound_reason(_event(start="2026-10-08T07:00:00+00:00"), _pm,
+                        _pm + timedelta(days=120)) is not None,
+          "the grace was widened for everything, not just all-day events")
+
     section("store.expire_past - the ledger and the digest agree on 'started'")
     # _bound_reason keeps a started event for _START_GRACE and expire_past used
     # to keep it for nothing, so a run could still offer an event in the digest
     # and mark the same row expired. One constant now answers for both.
-    _grace = int(_START_GRACE.total_seconds() // 3600)
     with tempfile.TemporaryDirectory() as tmp_gr:
         db = SqliteEventStore(Path(tmp_gr) / "grace.db")
         try:

@@ -72,6 +72,11 @@ CREATE TABLE IF NOT EXISTS events (
     -- Sticky too. The sweeper reminds ONCE per event; the cloud runs
     -- hourly, so without this a 72h window would mail 72 reminders.
     swept_at TEXT DEFAULT '',
+    -- The source gave a day, not a moment, so `start` is local midnight by
+    -- construction rather than by assertion. expire_past reads this to keep
+    -- the row alive until the day is over; without it a date-only event is
+    -- retired at midday.
+    all_day INTEGER NOT NULL DEFAULT 0,
     keyword_hits    TEXT DEFAULT ''
 );
 -- Cross-source dedupe reads this constantly; the PK alone does not serve it
@@ -115,7 +120,13 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         attendance_mode=AttendanceMode(row["attendance_mode"] or ""),
         description=row["description"] or "",
         rsvp_deadline=iso_or_empty(row["rsvp_deadline"] or ""),
-        published_at=iso_or_empty(row["published_at"] or ""))
+        published_at=iso_or_empty(row["published_at"] or ""),
+        # No presence test: the only caller SELECTs * from the real table, and
+        # the migration in __init__ has already added this column by then. An
+        # older mirror reaching import_jsonl is INSERTed and picks up the
+        # schema default instead of passing through here, so the guard that
+        # looks prudent would in fact be a branch nothing can reach.
+        all_day=bool(row["all_day"]))
 
 
 def _merge_timestamp(column: str, pick: str) -> str:
@@ -180,6 +191,15 @@ class SqliteEventStore:
                 "ALTER TABLE events ADD COLUMN cleared_floor_at TEXT DEFAULT ''")
             self._conn.execute(
                 "UPDATE events SET cleared_floor_at = alerted_at WHERE alerted_at != ''")
+        if "all_day" not in columns:
+            # No backfill, and it would be wrong to try. An older row's start
+            # was expanded to midnight by iso_or_empty before the bare date was
+            # preserved, so "00:00:00" no longer distinguishes a date-only
+            # event from a real midnight one. The next fetch sets it correctly
+            # for any row still live, which is every row the flag changes
+            # anything for.
+            self._conn.execute(
+                "ALTER TABLE events ADD COLUMN all_day INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
 
     def close(self) -> None:
@@ -235,7 +255,7 @@ class SqliteEventStore:
             score.reason if score else "",
             score.method if score else "",
             str(urgency) if urgency else "",
-            keyword_hits, now,
+            keyword_hits, int(event.all_day), now,
         )
         # ONE lock around read, decide and write. Splitting them, as an earlier
         # version did, leaves a check-then-act window: two threads can both see
@@ -253,15 +273,15 @@ class SqliteEventStore:
                    end_at=?, location=?, attendance_mode=?, description=?,
                    rsvp_deadline=?, published_at=?, source=?, source_kind=?,
                    fit=?, access_value=?, cost=?, reason=?, score_method=?,
-                       urgency=?, keyword_hits=?, last_seen=?
+                       urgency=?, keyword_hits=?, all_day=?, last_seen=?
                        WHERE event_uid=?""", values + (event.event_uid,))
                 return
             self._conn.execute(
                 """INSERT INTO events (canonical_url, title, organizer, start, end_at,
                location, attendance_mode, description, rsvp_deadline, published_at,
                source, source_kind, fit, access_value, cost, reason, score_method,
-               urgency, keyword_hits, last_seen, event_uid, state, first_seen)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?)""",
+               urgency, keyword_hits, all_day, last_seen, event_uid, state, first_seen)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?)""",
                 values + (event.event_uid, now))
 
     def set_state(self, event_uid: str, state: State) -> None:
@@ -357,7 +377,19 @@ class SqliteEventStore:
         with self._lock:
             cur = self._conn.execute(
                 "UPDATE events SET state='expired' WHERE start != '' "
-                "AND datetime(start) < datetime(?, ?) "
+                # An all-day row's start is local midnight, so the day itself
+                # is still ahead of it, and its end is the last second of the
+                # last local day. Reading that end is what makes a multi-day
+                # listing survive past its opening day.
+                #
+                # Only when all_day, because that end is SYNTHESISED by
+                # _stamp_naive from the dates the source gave. A stated end is
+                # not trustworthy for this: measured on the live ledger, 18 of
+                # the 261 rows with one run longer than 12 hours and one runs
+                # 384, so letting every end decide would keep a two-week ticket
+                # window in the digest for two weeks.
+                "AND datetime(CASE WHEN all_day = 1 AND end_at != '' "
+                "THEN end_at ELSE start END) < datetime(?, ?) "
                 "AND state NOT IN ('expired','registered','saved','dismissed',"
                 "'sold_out')",
                 (now_iso, f"-{grace_hours} hours"))
