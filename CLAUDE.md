@@ -15,6 +15,11 @@
   emailed. `--dry-run` does NOT prevent the delete. Ask before running it.
 - Redirect the output to a file and read it whole. Piping through `tail` has produced
   wrong conclusions here more than once, because the funnel sits at the top.
+- Run it as `conda run --no-capture-output -n ML python ...`. Without that flag conda
+  buffers the child's output and re-prints it through the console codepage, which on a
+  cp950 machine raises `UnicodeEncodeError` on the Chinese in every score reason. The
+  run itself completes, so the failure looks like a crash while the ledger has already
+  moved. Same flag for `check.py`.
 - Luma rate-limits. Three full fetches within a few minutes earns `HTTP Error 429` on
   the four luma sources, which surfaces as `check.py` failures that are not regressions.
 

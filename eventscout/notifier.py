@@ -13,8 +13,10 @@ from email.message import EmailMessage
 
 from zoneinfo import ZoneInfo
 
-# Re-exported, not merely imported: every notifier resolves the reader's zone
-# at construction, and check.py reaches for it here.
+# display_zone is used here, not re-exported for anyone else: both notifiers
+# resolve the reader's zone at construction. Every other caller imports it
+# from models, so the name has one source and this line can go the day no
+# notifier needs a zone.
 from .models import display_zone, parse_iso, Event
 from .protocols import Section
 

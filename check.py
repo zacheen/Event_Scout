@@ -46,7 +46,7 @@ from eventscout.geo import Anchor, GeoFilter
 from eventscout.http import (HttpClient, StubHttpClient, UrllibHttpClient,
                              _decode_body)
 from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
-                                 build_ics, display_zone, format_digest)
+                                 build_ics, format_digest)
 from eventscout import pipeline, protocols
 from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
                                 _parse_score,
@@ -60,7 +60,8 @@ from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
 from eventscout.store import SqliteEventStore
 from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
                                Urgency,
-                               is_date_only, iso_or_empty, parse_iso)
+                               display_zone, is_date_only, iso_or_empty,
+                               parse_iso)
 from eventscout.extract import PageFactExtractor
 from eventscout.sources._links import is_event_link, tails
 from eventscout.sources.gmail_label import GmailLabelSource
@@ -1012,6 +1013,86 @@ def offline() -> None:
     check("and an end that precedes the start does not shorten it",
           _stamp_naive(_event(start="2026-10-08", end="2026-10-01"), _pac).end
           == "2026-10-08T23:59:59-07:00", "the end went backwards")
+    # Every shape an end can arrive in beside a bare-date start; see
+    # _stamp_naive for why "whichever is later" is the rule. Each row below is
+    # a case where guessing the rule from the others would get it wrong.
+    for _end, _want, _why in [
+        ("2026-10-12",            "2026-10-12T23:59:59-07:00", "a later bare date"),
+        ("2026-10-12T15:00:00",   "2026-10-12T23:59:59-07:00", "a later naive time"),
+        ("2026-10-12T15:00:00-07:00", "2026-10-12T23:59:59-07:00",
+         "a later time that already stated its offset"),
+        ("2026-10-08T15:00:00",   "2026-10-08T23:59:59-07:00", "a time on the start's own day"),
+        ("2026-10-07T15:00:00",   "2026-10-08T23:59:59-07:00", "a time before the start"),
+        ("",                      "2026-10-08T23:59:59-07:00", "no end at all"),
+    ]:
+        _got = _stamp_naive(_event(start="2026-10-08", end=_end), _pac).end
+        check(f"an all-day start with {_why} ends at {_want[:10]}",
+              _got == _want, f"got {_got!r}, wanted {_want!r}")
+    # The local day is the one the instant lands on, not the one the string
+    # opens with; see _stamp_naive for why slicing the text would be wrong in
+    # both directions, and for the "+00:00" count that makes this a real case.
+    for _end, _want_day, _why in [
+        ("2026-10-06T05:00:00+00:00", "2026-10-05", "a UTC end that is still the 5th here"),
+        ("2026-10-05T23:30:00-11:00", "2026-10-06", "an end further west that is already the 6th"),
+    ]:
+        _got = _stamp_naive(_event(start="2026-10-04", end=_end), _pac).end
+        check(f"{_why} ends on {_want_day}",
+              _got.startswith(_want_day), f"got {_got!r}")
+
+    # The flag has to be true of the whole row; see _stamp_naive for why
+    # expire_past and _bound_reason depend on that.
+    check("and every all-day end is a synthesised last second, never a stated time",
+          all(_stamp_naive(_event(start="2026-10-08", end=e), _pac).end
+              .endswith("23:59:59-07:00")
+              for e in ("", "2026-10-12", "2026-10-12T15:00:00",
+                        "2026-10-12T15:00:00-07:00", "2026-10-08T15:00:00")),
+          "one of them carried a clock time through")
+
+    # An end before the start is dropped whatever shape it arrived in,
+    # including two fully zoned timestamps a source inverted itself, not only
+    # a bare-date one; build_ics then falls back to its hour-after-the-start
+    # default.
+    for _s, _e, _why in [
+        ("2026-10-08T09:00:00", "2026-10-05", "a bare date before the start"),
+        ("2026-10-08T09:00:00-07:00", "2026-10-05", "the same with a stated offset"),
+        ("2026-10-08T09:00:00-07:00", "2026-10-07T15:00:00-07:00",
+         "two zoned times the source itself inverted"),
+    ]:
+        _x = _stamp_naive(_event(start=_s, end=_e), _pac)
+        _ics = build_ics([_x])
+        check(f"{_why} is dropped rather than inverted",
+              _x.end == "" and "DTEND:20261008T170000Z" in _ics,
+              f"end={_x.end!r}, {[l for l in _ics.splitlines() if l[:2] == 'DT']}")
+    # A bare date in the END beside a TIMED start; see _stamp_naive for why
+    # this has to be settled before the all-day branch.
+    _mixed = _stamp_naive(_event(start="2026-10-08T09:00:00",
+                                 end="2026-10-08"), _pac)
+    check("a bare-date end beside a timed start runs to the end of that day",
+          _mixed.end == "2026-10-08T23:59:59-07:00", f"got {_mixed.end!r}")
+    check("so the end is never before the start",
+          parse_iso(_mixed.end) > parse_iso(_mixed.start),
+          f"{_mixed.start!r} -> {_mixed.end!r}")
+    check("and it is not mistaken for an all-day event",
+          _mixed.all_day is False, "a timed start was flagged all day")
+    _mixed_ics = build_ics([_mixed])
+    check("the calendar entry it produces is not inverted",
+          "DTSTART:20261008T160000Z" in _mixed_ics
+          and "DTEND:20261009T065959Z" in _mixed_ics, _mixed_ics)
+    # Reachable, not merely constructible: the URL collapse runs BEFORE
+    # _stamp_naive, so nothing is flagged all_day yet and merged_with's guard
+    # against a synthesised end cannot fire. One source's timed start and
+    # another's bare-date end therefore meet in one event.
+    _w = _event(event_uid="jsonld:https://x/9", url="https://x/9",
+                source="jsonld", source_kind="jsonld",
+                start="2026-10-08T09:00:00-07:00")
+    _l = _event(event_uid="wordpress:https://x/9", url="https://x/9",
+                source="wordpress", source_kind="wordpress", end="2026-10-08")
+    _pair_merged, _ = _collapse([_w, _l], {"jsonld": 0, "wordpress": 1},
+                                lambda e: e.url)
+    _joined = _stamp_naive(_pair_merged[0], _pac)
+    check("a timed start and a bare-date end meeting at the URL collapse agree",
+          parse_iso(_joined.end) > parse_iso(_joined.start),
+          f"{_joined.start!r} -> {_joined.end!r}")
 
     _shown_allday = format_digest(
         [("S", [(_allday, Score(fit=5, access_value=5, cost=2), Urgency.P2)])],

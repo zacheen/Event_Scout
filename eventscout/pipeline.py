@@ -692,10 +692,19 @@ def _stamp_naive(event: Event, zone: ZoneInfo) -> Event:
     where a seven-hour shift cannot reach the boundary that setting turns on.
 
     A bare date is the other case, and it is not the same as midnight. The
-    source said WHICH DAY and nothing more, so it becomes local midnight with
-    all_day set, and the end becomes the last second of that same local day.
-    Midnight alone would be read as a midnight start, and the row would be
-    retired at midday by expire_past even with the start grace.
+    source said WHICH DAY and nothing more, so a bare start becomes local
+    midnight with all_day set, and a bare end becomes the last second of its
+    own local day. Midnight alone would be read as a midnight start, and the
+    row would be retired at midday by expire_past even with the start grace.
+
+    An all-day event then ends at the last second of the later day, the one
+    the source stated or the start's own. That keeps a multi-day listing alive
+    for its whole range and still gives a single-day one an end it can be
+    drawn with, and it holds the end to day granularity so the all_day flag
+    stays true of the whole row.
+
+    Whatever the shape, an end that precedes the start is dropped. A source
+    can state one directly, so this is not a repair of anything above it.
 
     Returns the SAME object when nothing changed, which is what lets the caller
     count how often this fired without re-testing every field.
@@ -711,25 +720,78 @@ def _stamp_naive(event: Event, zone: ZoneInfo) -> Event:
         when = datetime.fromisoformat(text)
         if when.tzinfo is None:
             patch[field] = iso_or_empty(when.replace(tzinfo=zone).isoformat())
+    # A bare date in the END means "through that day", and that holds whatever
+    # the start looks like, so it is settled BEFORE the all-day branch rather
+    # than inside it. The loop above has just stamped it to local MIDNIGHT,
+    # which beside an 09:00 start lands nine hours EARLIER and makes build_ics
+    # emit a DTEND before its DTSTART, which RFC 5545 forbids and a calendar
+    # client either rejects or silently rewrites. Reachable, because the URL
+    # collapse runs before this function and can pair one source's timed start
+    # with another's bare-date end.
+    if is_date_only(event.end):
+        patch["end"] = _end_of_day(event.end, zone)
     if is_date_only(event.start):
-        day = datetime.fromisoformat(event.start).replace(tzinfo=zone)
         patch["all_day"] = True
-        patch["start"] = iso_or_empty(day.isoformat())
-        # The end is the last second of the LAST day, which is not always the
-        # first. Every node on the one feed measured states the same bare date
-        # on both sides, and taking that for a rule would silently cut a
-        # multi-day conference down to its opening day. A same-date or missing
-        # end is overwritten rather than filled, because stamping it would
-        # otherwise land it exactly on the start and build_ics would emit a
-        # zero-length VEVENT. A third shape is deliberately flattened: an end
-        # carrying a real time beside a date-only start mixes two precisions,
-        # and the start is the side that says what the source actually knew,
-        # so the day wins and the stated time is dropped.
-        last = event.end if is_date_only(event.end) else event.start
-        patch["end"] = iso_or_empty(
-            datetime.fromisoformat(max(last, event.start))
-            .replace(tzinfo=zone, hour=23, minute=59, second=59).isoformat())
+        patch["start"] = iso_or_empty(
+            datetime.fromisoformat(event.start).replace(tzinfo=zone).isoformat())
+        # The last second of the LATER day, the one the source stated or the
+        # start's own -- day only, never a stated clock time, since all_day
+        # means the source knew a day and not a time. An end that merely
+        # repeats the start is pushed out to end-of-day rather than left at
+        # the same instant, which is what stops build_ics emitting a
+        # zero-length VEVENT, and a day genuinely further out is kept in full:
+        # expire_past and _bound_reason both read this column for an all-day
+        # row on the strength that _stamp_naive always synthesises it, so
+        # flattening a five-day conference onto its opening day, or letting a
+        # stated clock time through unaltered, would each just as surely
+        # reopen the case those two say they are safe from.
+        #
+        # Reads `patch.get("end") or event.end`, never the patch alone. An end
+        # that already carried an offset was never stamped, so it is absent
+        # from the patch, and comparing against the patch only would treat the
+        # same event differently for having stated its offset.
+        #
+        # Which local day, converted, never sliced off the front of the
+        # string. A stated end carries whatever offset its source used, and 22
+        # rows in the live ledger end in "+00:00", so the date in the text is
+        # not the date the reader is on: "2026-10-06T05:00:00+00:00" is still
+        # the 5th in Pacific, and slicing it would hold the row a day too
+        # long. Comparing instants and then reading a date off the text is the
+        # same text-versus-instant split expire_past's docstring measures.
+        own_day = _end_of_day(event.start, zone)
+        stated = patch.get("end") or event.end
+        stated_when = parse_iso(stated) if stated else None
+        patch["end"] = (
+            _end_of_day(stated_when.astimezone(zone).date().isoformat(), zone)
+            if stated_when and stated_when > parse_iso(own_day)
+            else own_day)
+    # An end before the start is not a short event, it is an unusable value,
+    # so it is dropped rather than carried. build_ics then falls back to the
+    # hour-after-the-start it already uses for a missing end, instead of
+    # emitting a DTEND earlier than its DTSTART, which RFC 5545 forbids.
+    #
+    # Last, and on the merged values rather than the raw ones, because every
+    # branch above can produce this and no single one of them owns it. Two
+    # fully zoned timestamps can arrive inverted from a source without this
+    # function touching either.
+    final_start = patch.get("start") or event.start
+    final_end = patch.get("end") or event.end
+    if final_start and final_end and parse_iso(final_end) < parse_iso(final_start):
+        patch["end"] = ""
     return replace(event, **patch) if patch else event
+
+
+def _end_of_day(date_text: str, zone: ZoneInfo) -> str:
+    """The last second of `date_text` as a local instant.
+
+    Takes a bare date, since that is the only input whose whole day is being
+    claimed. Callers ordering this against anything else compare instants
+    through parse_iso rather than the strings, because only one side is
+    guaranteed to be this function's own fixed-width output.
+    """
+    return iso_or_empty(datetime.fromisoformat(date_text)
+                        .replace(tzinfo=zone, hour=23, minute=59, second=59)
+                        .isoformat())
 
 
 def _bound_reason(event: Event, now: datetime, horizon: datetime) -> str | None:
