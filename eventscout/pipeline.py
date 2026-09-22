@@ -570,6 +570,9 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
     # caller's list.
     urgent = [t for t in to_send if t[2] is Urgency.P0]
     rest = [t for t in to_send if t[2] is not Urgency.P0]
+    # urgent needs the sort as much as rest does. Left in fetch order, a
+    # digest has printed its P0 ranks as 48, 48, 42, 48.
+    urgent.sort(key=lambda t: (-t[1].rank, _start_order(t)))
     rest.sort(key=lambda t: (-t[1].rank, _start_order(t)))
     reminders = sorted(reminders, key=_start_order)
     # Its own section, not folded into TOP PICKS: these were sent once

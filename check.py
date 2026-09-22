@@ -1317,6 +1317,32 @@ def offline() -> None:
         finally:
             db.close()
 
+    section("pipeline._deliver - TOP PICKS is ordered like OTHER PICKS")
+    # A digest has printed TOP PICKS ranks as 48, 48, 42, 48, because only
+    # OTHER PICKS was sorted while TOP PICKS kept fetch order.
+    with tempfile.TemporaryDirectory() as tmp_top:
+        db = SqliteEventStore(Path(tmp_top) / "top.db")
+        box = _Sections()
+        _late = "2026-09-24T09:00:00-07:00"
+        _soon = "2026-09-23T09:00:00-07:00"
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                _deliver(Digest([
+                    (_event(event_uid="x:a", url="https://luma.com/a", start=_soon),
+                     Score(fit=7, access_value=6, cost=2), Urgency.P0),
+                    (_event(event_uid="x:b", url="https://luma.com/b", start=_late),
+                     Score(fit=8, access_value=6, cost=2), Urgency.P0),
+                    (_event(event_uid="x:c", url="https://luma.com/c", start=_soon),
+                     Score(fit=8, access_value=6, cost=2), Urgency.P0)],
+                    [], [], False, []), Funnel(), db, box, _offline, dry_run=True)
+            urls = next(u for head, u in box.sections if head.startswith("TOP PICKS"))
+            check("_deliver orders TOP PICKS by rank, then by the clock",
+                  urls == ["https://luma.com/c", "https://luma.com/b",
+                           "https://luma.com/a"],
+                  f"order {urls}")
+        finally:
+            db.close()
+
     section("pipeline - the last-call sweep, once and only once")
     # See run()'s step-5 comment for why the sweep exists. Run 2 below fetches
     # nothing at all -- only the ledger still remembers the event.
