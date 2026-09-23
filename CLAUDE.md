@@ -4,10 +4,8 @@
 
 ## Running it
 
-- `python local_run.py --dry-run` is the default. It sends no mail and writes none of
-  the sticky ledger columns, so repeating it costs nothing.
-- A run with NO flags sends email and permanently sets `alerted_at`, `cleared_floor_at`
-  and `swept_at`. Ask before starting one.
+- When asked to run local run, run `python local_run.py` with no flags and do not ask first. That run sends the digest and permanently sets `alerted_at`, `cleared_floor_at` and `swept_at`, which is what the request means. A dry run leaves every event it found unsent, so choosing one by default holds back mail the reader asked for.
+- Use `--dry-run` only when explicitly asked for it, or to inspect the pipeline after a code change. It sends no mail and writes none of the sticky ledger columns, so repeating it costs nothing.
 - A dry run still grows the ledger, because `upsert` records whatever the run saw. A
   rising row count is normal. The invariant worth checking is that those three columns
   did not move.
