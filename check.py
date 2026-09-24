@@ -2045,6 +2045,12 @@ def offline() -> None:
                                  source_kind=kind, start=_SOON))
                 db.mark_alerted([f"{kind}:{url}"], at="2026-09-01T00:00:00+00:00")
             db.save()
+            # 44h before _SOON, so the row is inside the 72h window and only
+            # the state set by --mark can keep it out of the sweep.
+            _in_window = "2026-09-29T05:00:00+00:00"
+            check("before marking, the event is due for a last call",
+                  len(db.due_for_resweep(72, _in_window, min_gap_hours=24)) == 2,
+                  "the check below would pass whatever --mark does")
             db.close()
 
             def mark(*argv):
@@ -2065,7 +2071,7 @@ def offline() -> None:
             check("every listing of that event is marked, not just one",
                   states == {"registered"}, f"states {states}")
             check("and it stops being due for a last call",
-                  not db.due_for_resweep(72, "2026-09-24T00:00:00+00:00", min_gap_hours=24),
+                  not db.due_for_resweep(72, _in_window, min_gap_hours=24),
                   "the sweep still wants it")
         finally:
             db.close()
