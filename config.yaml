@@ -140,6 +140,11 @@ lookahead_days: 120
 # and three mails a day for one event reads as spam rather than urgency. The
 # send time is the workflow's cron, not a setting here.
 urgent_section_within_hours: 72
+# The shortest time between an event's first mail and its LAST CALL. Without it
+# an event first mailed just before the window opens is reminded on the very
+# next run. 24 is a judgement, not a measurement. An event first mailed INSIDE
+# the window never gets a LAST CALL at all, whatever this says.
+resweep_min_gap_hours: 24
 
 # Score thresholds. rank = fit x access_value, so 1-100.
 #

@@ -40,19 +40,19 @@ class PrivacyTests(unittest.TestCase):
             uid = "gmail_label:" + legacy_url
             events.write_text(json.dumps({"event_uid": uid, "canonical_url": legacy_url,
                 "title": "Career fair", "source": "gmail_label", "source_kind": "gmail_label",
-                "start": "2026-10-02T10:00:00+00:00", "first_seen": "2026-10-01T10:00:00+00:00",
-                "last_seen": "2026-10-01T10:00:00+00:00", "alerted_at": "2026-10-01T10:00:00+00:00",
+                "start": "2026-10-02T10:00:00+00:00", "first_seen": "2026-09-20T10:00:00+00:00",
+                "last_seen": "2026-09-20T10:00:00+00:00", "alerted_at": "2026-09-20T10:00:00+00:00",
                 "cleared_floor_at": "2026-10-01T10:00:00+00:00"}))
             store = SqliteEventStore(":memory:")
             try:
                 store.import_jsonl(events, cache)
                 self.assertIn("https://luma.com/example", store.reported_urls())
-                reminders = store.due_for_resweep(72, "2026-10-01T12:00:00+00:00")
+                reminders = store.due_for_resweep(72, "2026-10-01T12:00:00+00:00", min_gap_hours=24)
                 self.assertEqual([event.url for event in reminders], ["https://luma.com/example"])
                 self.assertEqual(reminders[0].event_uid, uid)
                 self.assertEqual(store.mark_by_url("https://luma.com/example", State.REGISTERED),
                                  [(uid, "Career fair")])
-                self.assertEqual(store.due_for_resweep(72, "2026-10-01T12:00:00+00:00"), [])
+                self.assertEqual(store.due_for_resweep(72, "2026-10-01T12:00:00+00:00", min_gap_hours=24), [])
                 store.export_jsonl(events, cache)
                 self.assertEqual(json.loads(events.read_text())["canonical_url"],
                                  "https://luma.com/example")

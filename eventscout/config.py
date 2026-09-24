@@ -39,6 +39,7 @@ class Settings:
     keyword_match_prefix_chars: int = 2000
     lookahead_days: int = 30
     urgent_hours: int = 72
+    resweep_min_gap_hours: int = 24
     digest_min_rank: int = 10
     p0_min_rank: int = 40
     p1_min_rank: int = 9
@@ -89,6 +90,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
         keyword_match_prefix_chars=int(raw.get("keyword_match_prefix_chars", 2000)),
         lookahead_days=int(raw.get("lookahead_days", 30)),
         urgent_hours=int(raw.get("urgent_section_within_hours", 72)),
+        resweep_min_gap_hours=int(raw.get("resweep_min_gap_hours", 24)),
         digest_min_rank=int(raw.get("digest_min_rank", 10)),
         p0_min_rank=int(raw.get("p0_min_rank", 40)),
         p1_min_rank=int(raw.get("p1_min_rank", 9)),

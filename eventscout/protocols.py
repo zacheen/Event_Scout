@@ -214,7 +214,13 @@ class EventStore(ScoreCache, Protocol):
 
     def mark_sold_out(self, event_uids: list[str]) -> int: ...
 
-    def mark_alerted(self, event_uids: list[str]) -> None: ...
+    def mark_alerted(self, event_uids: list[str], at: str | None = None) -> None:
+        """Stamp these as mailed, at `at` or else the wall clock.
+
+        `at` exists so a run stamps with the same clock due_for_resweep later
+        compares against. The pipeline passes its own `now`.
+        """
+        ...
 
     def expire_past(self, now_iso: str, grace_hours: int) -> int:
         """Mark already-started events expired and return how many rows changed.
@@ -234,7 +240,8 @@ class EventStore(ScoreCache, Protocol):
         """Ledger population per state, for the end-of-run summary line."""
         ...
 
-    def due_for_resweep(self, within_hours: int, now_iso: str) -> list[Event]:
+    def due_for_resweep(self, within_hours: int, now_iso: str, *,
+                        min_gap_hours: int) -> list[Event]:
         """Events CLOSING inside the window that still need a nudge.
 
         The window is measured against `rsvp_deadline or start`, the same
@@ -261,8 +268,19 @@ class EventStore(ScoreCache, Protocol):
             under a heading that says the reader had not acted, and the second
             one puts the same real event in the mail twice.
 
-        Note this deliberately does NOT ask how long ago the alert was: being
-        told about an event three weeks ago is exactly the case this catches.
+        Two more conditions on WHEN the alert went out, both measured on a live
+        run where 3 of 7 last calls went to events first mailed the day before:
+
+        alerted_at before the window opened -- a first mail sent inside the
+            window already was the closing-soon notice, and the event sat in
+            TOP PICKS or OTHER PICKS for it. Reminding again repeats it under
+            a heading that says it is the only reminder.
+        alerted_at at least `min_gap_hours` ago -- an alert just before the
+            window opens would otherwise be followed by a last call on the
+            very next run, one hour later on an hourly schedule.
+
+        There is still no upper bound on the alert's age: being told about an
+        event three weeks ago is exactly the case this catches.
         """
         ...
 

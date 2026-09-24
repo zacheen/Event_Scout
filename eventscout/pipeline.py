@@ -42,6 +42,9 @@ class Digest:
     # sweep, which gates on alerted_at and never looks at rank -- so every one
     # of them, at any rank, would come back as a last call.
     below_floor: list[tuple[Event, Score, Urgency]]
+    # The run's clock, which mark_alerted stamps with so that due_for_resweep
+    # compares alerted_at against the same clock on the next run.
+    now: datetime
 
 
 class AllSourcesFailedError(RuntimeError):
@@ -483,7 +486,9 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
         already = {e.event_uid for e, _, _ in to_send}
         already_same = {key for e, _, _ in to_send
                         if (key := _same_event_key(e)) is not None}
-        for event in store.due_for_resweep(settings.urgent_hours, now.isoformat()):
+        for event in store.due_for_resweep(
+                settings.urgent_hours, now.isoformat(),
+                min_gap_hours=settings.resweep_min_gap_hours):
             key = _same_event_key(event)
             if event.event_uid in already or (key is not None and key in already_same):
                 continue
@@ -508,8 +513,8 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
 
     print(render_funnel(funnel))
     sent = _deliver(Digest(to_send, reminders, cleared, seeding,
-                           below_floor if show_below_floor else []), funnel,
-                    store, notifier, settings, dry_run)
+                           below_floor if show_below_floor else [], now),
+                    funnel, store, notifier, settings, dry_run)
     # Last, so the reminders above have already been mailed and the funnel has
     # already been printed. Zero sent and exit 0 is the outcome a total scoring
     # outage used to produce, and it is indistinguishable from a quiet week,
@@ -575,17 +580,7 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
     urgent.sort(key=lambda t: (-t[1].rank, _start_order(t)))
     rest.sort(key=lambda t: (-t[1].rank, _start_order(t)))
     reminders = sorted(reminders, key=_start_order)
-    # Its own section, not folded into TOP PICKS: these were sent once
-    # already, so the reader needs to see why the same event is back.
-    #
-    # The heading says what the ledger actually knows. It cannot say "you have
-    # not acted on it": the only states that would prove otherwise are set by
-    # EventStore.set_state, which nothing but local_run.py --mark reaches, so
-    # for a reader who has never run that the claim would always be true by
-    # construction and therefore meaningless.
     sections: list[Section] = [
-        (f"LAST CALL - starts within {settings.urgent_hours}h, "
-         "sent once before, and this is the only reminder", reminders),
         # Named for the rank cut, not for the clock. These two split on
         # Urgency.P0, which needs a rank of p0_min_rank as well as a start
         # inside urgent_hours, so a heading promising only "within 72h" was
@@ -601,6 +596,19 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
             (f"BELOW THE USUAL FLOOR - rank under {settings.digest_min_rank}, "
              "shown once on the first run so the cut is yours to make",
              below_floor))
+    # Its own section, not folded into TOP PICKS: these were sent once
+    # already, so the reader needs to see why the same event is back. Last in
+    # the mail for the same reason, since what the reader has never seen
+    # belongs above what they have.
+    #
+    # The heading says what the ledger actually knows. It cannot say "you have
+    # not acted on it": the only states that would prove otherwise are set by
+    # EventStore.set_state, which nothing but local_run.py --mark reaches, so
+    # for a reader who has never run that the claim would always be true by
+    # construction and therefore meaningless.
+    sections.append(
+        (f"LAST CALL - starts within {settings.urgent_hours}h, "
+         "sent once before, and this is the only reminder", reminders))
     total = len(to_send) + len(reminders) + len(below_floor)
     subject = (f"[Event Scout] {total} events"
                + (f" ({len(urgent) + len(reminders)} closing soon)"
@@ -623,7 +631,8 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
         # After the send, never before: every line here claims the reader has
         # seen these, and notifier.send raises when SMTP refuses.
         store.mark_cleared_floor(digest.cleared)
-        store.mark_alerted([e.event_uid for e, _, _ in to_send])
+        store.mark_alerted([e.event_uid for e, _, _ in to_send],
+                           at=digest.now.isoformat())
         # Marked separately and permanently: mark_alerted would leave these
         # eligible again on the next hourly run, which is 72 reminders for one
         # event over a 72h window.

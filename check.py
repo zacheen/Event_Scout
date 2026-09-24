@@ -856,7 +856,8 @@ def offline() -> None:
             reminders_in = [_entry("late", 1, "2026-09-30T18:00:00-07:00"),
                             _entry("early", 1, "2026-09-21T18:00:00-07:00")]
             below_in = [_entry("low", 1, _WHEN), _entry("high", 9, _WHEN)]
-            digest = Digest([], reminders_in, [], False, below_in)
+            digest = Digest([], reminders_in, [], False, below_in,
+                            datetime(2026, 9, 1, tzinfo=timezone.utc))
             with contextlib.redirect_stdout(io.StringIO()):
                 _deliver(digest, Funnel(), db, _Mailbox(), _offline, dry_run=True)
             check("_deliver does not reorder the reminders it was handed",
@@ -1179,8 +1180,8 @@ def offline() -> None:
             # Through due_for_resweep, the only caller of _row_to_event, so
             # the READ path is covered too: writing the column and dropping it
             # on the way back out looks identical from the table.
-            db.mark_alerted([_allday.event_uid])
-            _due = db.due_for_resweep(48, "2026-10-07T00:00:00+00:00")
+            db.mark_alerted([_allday.event_uid], at="2026-09-01T00:00:00+00:00")
+            _due = db.due_for_resweep(48, "2026-10-07T00:00:00+00:00", min_gap_hours=24)
             check("and rehydrating an Event brings the flag back with it",
                   len(_due) == 1 and _due[0].all_day is True,
                   f"got {[(e.event_uid, e.all_day) for e in _due]}")
@@ -1303,16 +1304,17 @@ def offline() -> None:
             with contextlib.redirect_stdout(io.StringIO()):
                 _deliver(Digest([(_event(start=_WHEN),
                                   Score(fit=5, access_value=5, cost=2),
-                                  Urgency.P2)], [], [], False, []),
+                                  Urgency.P2)], [], [], False, [],
+                                 datetime(2026, 9, 1, tzinfo=timezone.utc)),
                          Funnel(), db, box, _offline, dry_run=True)
             heads = [head for head, _ in box.sections]
             check("a P1 or P2 event is not filed under a bare time heading",
                   not any(h.startswith("CLOSING SOON") for h in heads),
                   f"headings {heads}")
             check("the sections say they are picks, not a clock",
-                  heads == ["LAST CALL - starts within 72h, sent once before, "
-                            "and this is the only reminder",
-                            "TOP PICKS - closing within 72h", "OTHER PICKS"],
+                  heads == ["TOP PICKS - closing within 72h", "OTHER PICKS",
+                            "LAST CALL - starts within 72h, sent once before, "
+                            "and this is the only reminder"],
                   f"headings {heads}")
         finally:
             db.close()
@@ -1334,7 +1336,8 @@ def offline() -> None:
                      Score(fit=8, access_value=6, cost=2), Urgency.P0),
                     (_event(event_uid="x:c", url="https://luma.com/c", start=_soon),
                      Score(fit=8, access_value=6, cost=2), Urgency.P0)],
-                    [], [], False, []), Funnel(), db, box, _offline, dry_run=True)
+                    [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)),
+                    Funnel(), db, box, _offline, dry_run=True)
             urls = next(u for head, u in box.sections if head.startswith("TOP PICKS"))
             check("_deliver orders TOP PICKS by rank, then by the clock",
                   urls == ["https://luma.com/c", "https://luma.com/b",
@@ -1384,6 +1387,44 @@ def offline() -> None:
             check("and never a second time, or an hourly schedule would send "
                   "one reminder per hour of the window",
                   len(box.mailed) == first + 1, f"mailed {box.mailed}")
+        finally:
+            db.close()
+
+    # Through run(), because the store query only sees alerted_at, and the
+    # pipeline is what stamps it. Stamped with the wall clock instead of the
+    # run's own `now`, this passes or fails depending on the day check.py runs.
+    class _Late:
+        kind = name = "jsonld"
+
+        def fetch(self):
+            return [_event(event_uid="jsonld:https://luma.com/late",
+                           url="https://luma.com/late", source=self.kind,
+                           source_kind=self.kind, title=_RICH, description=_RICH,
+                           start="2026-09-30T16:00:00-07:00",
+                           location="Palo Alto, CA",
+                           published_at="2026-09-28T00:00:00")]
+
+    with tempfile.TemporaryDirectory() as tmp_late:
+        db = SqliteEventStore(Path(tmp_late) / "late.db")
+        box = _Mailbox()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                run([_Once()], db, build_geo(load_channels()), _offline, box,
+                    dry_run=False, now=_T0)
+                # 63h before its start, so the first mail is already inside
+                # the 72h window. A different start from _Once's, or the
+                # title+time key would treat the two as one event.
+                run([_Late()], db, build_geo(load_channels()), _offline, box,
+                    dry_run=False, now=_later(200))
+                run([], db, build_geo(load_channels()), _offline, box,
+                    dry_run=False, now=_later(239))
+            check("an event first mailed inside the window is mailed once, "
+                  "never again as a last call",
+                  box.mailed.count("https://luma.com/late") == 1,
+                  f"mailed {box.mailed}")
+            check("while the event first mailed ten days out still gets one",
+                  box.mailed.count("https://luma.com/soon") == 2,
+                  f"mailed {box.mailed}")
         finally:
             db.close()
 
@@ -1530,7 +1571,7 @@ def offline() -> None:
                 uid = f"{kind}:{url}"
                 db.upsert(_listing_at(kind, url, _RICH, _RICH, _SOON),
                           Score(9, 9, 1), Urgency.P2)
-                db.mark_alerted([uid])
+                db.mark_alerted([uid], at=_T0.isoformat())
                 db.mark_cleared_floor([uid])
             db.save()
             with contextlib.redirect_stdout(io.StringIO()):
@@ -1865,7 +1906,8 @@ def offline() -> None:
         box = _Sections()
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                _deliver(Digest(list(_pair), [], [], False, []), Funnel(), db,
+                _deliver(Digest(list(_pair), [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)),
+                         Funnel(), db,
                          box, _offline, dry_run=True)
             urls = next(u for head, u in box.sections if head == "OTHER PICKS")
             check("_deliver orders OTHER PICKS by the clock too",
@@ -2001,7 +2043,7 @@ def offline() -> None:
             for kind in ("jsonld", "newsletter"):
                 db.upsert(_event(event_uid=f"{kind}:{url}", url=url,
                                  source_kind=kind, start=_SOON))
-                db.mark_alerted([f"{kind}:{url}"])
+                db.mark_alerted([f"{kind}:{url}"], at="2026-09-01T00:00:00+00:00")
             db.save()
             db.close()
 
@@ -2023,7 +2065,7 @@ def offline() -> None:
             check("every listing of that event is marked, not just one",
                   states == {"registered"}, f"states {states}")
             check("and it stops being due for a last call",
-                  not db.due_for_resweep(72, "2026-09-24T00:00:00+00:00"),
+                  not db.due_for_resweep(72, "2026-09-24T00:00:00+00:00", min_gap_hours=24),
                   "the sweep still wants it")
         finally:
             db.close()
@@ -2310,9 +2352,9 @@ def offline() -> None:
                 db.upsert(_event(event_uid=uid, url=f"https://x/{uid}", start=start))
                 # Alerted, or the sweep would correctly ignore them: a row the
                 # reader was never told about is not one they failed to act on.
-                db.mark_alerted([uid])
+                db.mark_alerted([uid], at="2026-09-01T00:00:00+00:00")
                 db.set_state(uid, state)
-            got = {e.event_uid for e in db.due_for_resweep(72, now)}
+            got = {e.event_uid for e in db.due_for_resweep(72, now, min_gap_hours=24)}
             want = {uid for uid, _, _, keep in rows if keep}
             check("a 72h window returns exactly the unactioned, still-future events",
                   got == want, f"got {sorted(got)}, want {sorted(want)}")
@@ -2327,14 +2369,14 @@ def offline() -> None:
             noon_utc = "2026-09-09T18:00:00+00:00"
             evening = iso_or_empty("2026-09-09T17:30:00.000-07:00")
             db.upsert(_event(event_uid="tz", url="https://x/tz", start=evening))
-            db.mark_alerted(["tz"])
+            db.mark_alerted(["tz"], at="2026-09-01T00:00:00+00:00")
             db.expire_past(noon_utc, 0)
             still = db._conn.execute(
                 "SELECT state FROM events WHERE event_uid='tz'").fetchone()[0]
             check("an event six hours away is not expired by string order",
                   still != "expired", f"state={still}")
             check("and it is what the last call is looking for",
-                  "tz" in {e.event_uid for e in db.due_for_resweep(24, noon_utc)},
+                  "tz" in {e.event_uid for e in db.due_for_resweep(24, noon_utc, min_gap_hours=24)},
                   "the sweep skipped a same-day event written in -07:00")
 
             # Same disagreement due_for_resweep's docstring describes (P0
@@ -2342,9 +2384,9 @@ def offline() -> None:
             db.upsert(_event(event_uid="rsvp", url="https://x/rsvp",
                              start="2026-09-18T10:00:00+00:00",
                              rsvp_deadline="2026-09-08T12:00:00+00:00"))
-            db.mark_alerted(["rsvp"])
+            db.mark_alerted(["rsvp"], at="2026-09-01T00:00:00+00:00")
             check("an event ten days out whose RSVP closes in 12h IS due",
-                  "rsvp" in {e.event_uid for e in db.due_for_resweep(72, now)},
+                  "rsvp" in {e.event_uid for e in db.due_for_resweep(72, now, min_gap_hours=24)},
                   "the sweep read the start and missed the door")
             check("the same row is P0, which is the agreement being asserted",
                   DeadlineUrgency(72, 40, 9).classify(
@@ -2360,9 +2402,9 @@ def offline() -> None:
             db.upsert(_event(event_uid="rsvp-past", url="https://x/rsvp-past",
                              start="2026-09-09T10:00:00+00:00",
                              rsvp_deadline="2026-09-01T12:00:00+00:00"))
-            db.mark_alerted(["rsvp-past"])
+            db.mark_alerted(["rsvp-past"], at="2026-09-01T00:00:00+00:00")
             check("a closed RSVP is not swept on its start instead",
-                  "rsvp-past" not in {e.event_uid for e in db.due_for_resweep(72, now)},
+                  "rsvp-past" not in {e.event_uid for e in db.due_for_resweep(72, now, min_gap_hours=24)},
                   "the deadline was ignored once it stopped being convenient")
 
             # Simulates a row written before the iso_or_empty gate existed, by
@@ -2373,10 +2415,33 @@ def offline() -> None:
                 "INSERT INTO events(event_uid, canonical_url, title, source, "
                 "source_kind, start, state, first_seen, last_seen, alerted_at) "
                 "VALUES('legacy','https://x/legacy','Legacy','s','jsonld',"
-                "'2026-09-09T17:30:00.000-07:00','seen','x','x','y')")
-            got = {e.event_uid for e in db.due_for_resweep(24, noon_utc)}
+                "'2026-09-09T17:30:00.000-07:00','seen','x','x',"
+                "'2026-09-01T00:00:00+00:00')")
+            got = {e.event_uid for e in db.due_for_resweep(24, noon_utc, min_gap_hours=24)}
             check("a row stored before the gate existed still loads",
                   "legacy" in got, "reading the ledger raised or skipped it")
+
+            # One live run sent 3 of its 7 last calls to events first mailed
+            # the day before, all already inside the window when first mailed.
+            # Each case isolates one condition: the other one passes.
+            db.upsert(_event(event_uid="first-inside", url="https://x/first-inside",
+                             start="2026-09-09T10:00:00+00:00"))
+            db.mark_alerted(["first-inside"], at="2026-09-07T00:00:00+00:00")
+            check("an event first mailed inside the window never gets a last call",
+                  "first-inside" not in {e.event_uid for e in
+                                         db.due_for_resweep(72, now, min_gap_hours=24)},
+                  "its first mail was already the closing-soon notice")
+            db.upsert(_event(event_uid="just-told", url="https://x/just-told",
+                             start="2026-09-09T10:00:00+00:00"))
+            db.mark_alerted(["just-told"], at="2026-09-06T00:00:00+00:00")
+            check("nor does one mailed just before the window, inside the gap",
+                  "just-told" not in {e.event_uid for e in db.due_for_resweep(
+                      72, "2026-09-06T12:00:00+00:00", min_gap_hours=24)},
+                  "a last call went out 12h after the first mail")
+            check("but the same row is due once the gap has passed",
+                  "just-told" in {e.event_uid for e in db.due_for_resweep(
+                      72, "2026-09-07T12:00:00+00:00", min_gap_hours=24)},
+                  "the gap withheld a reminder it should only delay")
 
             # expire_past spells the same grouping out in SQL. Checked by
             # behaviour rather than by reading the string, because the failure

@@ -342,8 +342,8 @@ class SqliteEventStore:
                 [(str(State.SOLD_OUT), uid) for uid in event_uids])
             return cursor.rowcount
 
-    def mark_alerted(self, event_uids: list[str]) -> None:
-        now = _now()
+    def mark_alerted(self, event_uids: list[str], at: str | None = None) -> None:
+        now = at or _now()
         with self._lock:
             self._conn.executemany(
                 "UPDATE events SET alerted_at=?, state=CASE WHEN state='new' THEN 'seen' "
@@ -508,11 +508,12 @@ class SqliteEventStore:
             self._conn.commit()
 
     # -- reads -------------------------------------------------------------
-    def due_for_resweep(self, within_hours: int, now_iso: str) -> list[Event]:
+    def due_for_resweep(self, within_hours: int, now_iso: str, *,
+                        min_gap_hours: int) -> list[Event]:
         """Events closing inside the window that were mailed and left alone.
 
         See EventStore.due_for_resweep for the closing timestamp and for why
-        all three of the other conditions are needed.
+        each of the other conditions is needed.
         """
         with self._lock:
             rows = self._conn.execute(
@@ -532,8 +533,14 @@ class SqliteEventStore:
                 # the event this query exists to catch.
                 "AND datetime(closes_at) > datetime(?) "
                 "AND datetime(closes_at) <= datetime(?, ?) "
+                # A first mail sent inside the window already was the
+                # closing-soon notice, so it never earns a LAST CALL.
+                "AND datetime(alerted_at) < datetime(closes_at, ?) "
+                "AND datetime(alerted_at) <= datetime(?, ?) "
                 "ORDER BY datetime(closes_at) ASC",
-                (now_iso, now_iso, f"+{within_hours} hours")).fetchall()
+                (now_iso, now_iso, f"+{within_hours} hours",
+                 f"-{within_hours} hours",
+                 now_iso, f"-{min_gap_hours} hours")).fetchall()
         return [_row_to_event(r) for r in rows]
 
     def mark_swept(self, event_uids: list[str]) -> None:
