@@ -1238,6 +1238,24 @@ def offline() -> None:
           _bound_reason(_event(start="2026-10-08T07:00:00+00:00"), _pm,
                         _pm + timedelta(days=120)) is not None,
           "the grace was widened for everything, not just all-day events")
+    # The grace is for an event whose end is known. One with no end is cut the
+    # moment it starts, since nothing says how much of it is left, and one
+    # digest offered such an event six hours after it began.
+    _started_1h = datetime(2026, 10, 8, 8, tzinfo=timezone.utc)
+    _hz = _started_1h + timedelta(days=120)
+    check("a started event with no end is cut at once",
+          _bound_reason(_event(start="2026-10-08T07:00:00+00:00"),
+                        _started_1h, _hz) == pipeline._STARTED,
+          "it was kept for the grace though nothing says it is still on")
+    check("while one with a stated end keeps the grace",
+          _bound_reason(_event(start="2026-10-08T07:00:00+00:00",
+                               end="2026-10-08T10:00:00+00:00"),
+                        _started_1h, _hz) is None,
+          "the grace was dropped for every event, not just the endless ones")
+    check("and one not yet started is kept whether or not it has an end",
+          _bound_reason(_event(start="2026-10-08T09:00:00+00:00"),
+                        _started_1h, _hz) is None,
+          "an upcoming event was cut")
 
     section("store.expire_past - the ledger and the digest agree on 'started'")
     # _bound_reason keeps a started event for _START_GRACE and expire_past used
@@ -1274,7 +1292,8 @@ def offline() -> None:
         def fetch(self):
             return [replace(_listing("jsonld", "https://luma.com/started"),
                             event_uid="jsonld:started",
-                            start="2026-09-19T18:00:00+00:00")]
+                            start="2026-09-19T18:00:00+00:00",
+                            end="2026-09-20T03:00:00+00:00")]
 
     with tempfile.TemporaryDirectory() as tmp_run:
         db = SqliteEventStore(Path(tmp_run) / "started.db")
