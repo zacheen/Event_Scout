@@ -1238,21 +1238,20 @@ def offline() -> None:
           _bound_reason(_event(start="2026-10-08T07:00:00+00:00"), _pm,
                         _pm + timedelta(days=120)) is not None,
           "the grace was widened for everything, not just all-day events")
-    # The grace is for an event whose end is known. One with no end is cut the
-    # moment it starts, since nothing says how much of it is left, and one
-    # digest offered such an event six hours after it began.
+    # A timed event is cut the moment it starts, with or without a stated end,
+    # since one digest offered an event six hours after it began.
     _started_1h = datetime(2026, 10, 8, 8, tzinfo=timezone.utc)
     _hz = _started_1h + timedelta(days=120)
-    check("a started event with no end is cut at once",
+    check("a timed event that started an hour ago is cut",
           _bound_reason(_event(start="2026-10-08T07:00:00+00:00"),
                         _started_1h, _hz) == pipeline._STARTED,
-          "it was kept for the grace though nothing says it is still on")
-    check("while one with a stated end keeps the grace",
+          "it was kept though it had already begun")
+    check("and so is one whose stated end is still ahead",
           _bound_reason(_event(start="2026-10-08T07:00:00+00:00",
                                end="2026-10-08T10:00:00+00:00"),
-                        _started_1h, _hz) is None,
-          "the grace was dropped for every event, not just the endless ones")
-    check("and one not yet started is kept whether or not it has an end",
+                        _started_1h, _hz) == pipeline._STARTED,
+          "a stated end kept a started event in the digest")
+    check("while one not yet started is kept",
           _bound_reason(_event(start="2026-10-08T09:00:00+00:00"),
                         _started_1h, _hz) is None,
           "an upcoming event was cut")
@@ -1268,46 +1267,56 @@ def offline() -> None:
                              start="2026-09-20T06:00:00+00:00"))
             db.upsert(_event(event_uid="stale", url="https://x/stale",
                              start="2026-09-19T20:00:00+00:00"))
-            db.expire_past("2026-09-20T12:00:00+00:00", _grace)
+            # A literal 12, not _grace. This half proves the store honours
+            # whatever grace it is handed, which a grace of 0 cannot show.
+            db.expire_past("2026-09-20T12:00:00+00:00", 12)
             def _state(uid):
                 return db._conn.execute(
                     "SELECT state FROM events WHERE event_uid=?",
                     (uid,)).fetchone()[0]
-            check("an event that started 6h ago survives, as the window says",
+            check("the store keeps an event 6h into a 12h grace",
                   _state("fresh") != "expired", f"state={_state('fresh')}")
-            check("one that started 16h ago does not",
+            check("and retires one 16h in",
                   _state("stale") == "expired", f"state={_state('stale')}")
         finally:
             db.close()
-    check("and the grace the pipeline hands over is the one it filters on",
-          _grace == 12, f"_START_GRACE is {_START_GRACE}")
+    check("and the grace the pipeline hands over is none at all",
+          _grace == 0, f"_START_GRACE is {_START_GRACE}")
 
     # Through run(), because the store honouring a grace it is handed proves
-    # nothing about the pipeline handing over the right one. This is the shape
-    # that was measured: an event six hours old still sent in the digest while
-    # the same run's expire_past retired it.
-    class _JustStarted:
+    # nothing about the pipeline handing over the right one. The measured shape
+    # was an event still sent in the digest while the same run's expire_past
+    # retired it. With no grace the two meet at the start itself, so one event
+    # sits just before now and one just after.
+    class _AroundNow:
         kind = name = "jsonld"
 
         def fetch(self):
             return [replace(_listing("jsonld", "https://luma.com/started"),
                             event_uid="jsonld:started",
-                            start="2026-09-19T18:00:00+00:00",
-                            end="2026-09-20T03:00:00+00:00")]
+                            start="2026-09-19T23:00:00+00:00",
+                            end="2026-09-20T03:00:00+00:00"),
+                    replace(_listing("jsonld", "https://luma.com/upcoming"),
+                            event_uid="jsonld:upcoming",
+                            start="2026-09-20T01:00:00+00:00")]
 
     with tempfile.TemporaryDirectory() as tmp_run:
         db = SqliteEventStore(Path(tmp_run) / "started.db")
         box = _Mailbox()
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                run([_JustStarted()], db, build_geo(load_channels()), _offline,
+                run([_AroundNow()], db, build_geo(load_channels()), _offline,
                     box, dry_run=False, now=_NOW)
-            state = db._conn.execute(
-                "SELECT state FROM events WHERE event_uid='jsonld:started'"
-            ).fetchone()[0]
-            check("a run that mails a just-started event does not expire it",
-                  "https://luma.com/started" in box.mailed and state != "expired",
-                  f"mailed={box.mailed}, state={state}")
+            row = db._conn.execute(
+                "SELECT state FROM events WHERE event_uid='jsonld:upcoming'"
+            ).fetchone()
+            check("an event an hour away is mailed and not expired",
+                  "https://luma.com/upcoming" in box.mailed
+                  and row is not None and row[0] != "expired",
+                  f"mailed={box.mailed}, state={row and row[0]}")
+            check("while one that began an hour ago is not mailed",
+                  "https://luma.com/started" not in box.mailed,
+                  f"mailed={box.mailed}")
         finally:
             db.close()
 

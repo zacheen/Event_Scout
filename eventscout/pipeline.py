@@ -692,9 +692,12 @@ def _safe_score(scorer: EventScorer, event: Event) -> Score | None:
         return None
 
 
-# How long after it starts an event is still worth reporting. You can still
-# walk into this morning's session; yesterday's is gone.
-_START_GRACE = timedelta(hours=12)
+# How long after it starts an event is still worth reporting. Zero, because a
+# timed event that has begun is too late to go to, and one digest offered an
+# event six hours after it began. An all-day event is measured from its
+# synthesised end instead (see _bound_reason), so it still stays through its
+# own day.
+_START_GRACE = timedelta(0)
 _STARTED = "started"
 _TOO_FAR = "far"
 
@@ -836,11 +839,6 @@ def _bound_reason(event: Event, now: datetime, horizon: datetime) -> str | None:
     # expire_past for the measurement that rules it out.
     over = parse_iso(event.end) if event.all_day and event.end else None
     over = over or when
-    # The grace is only for an event that says when it ends. With no end there
-    # is no telling how much of it is left, and one digest offered such an
-    # event six hours after it began.
-    if not event.end and when <= now:
-        return _STARTED
     if over < now - _START_GRACE:
         return _STARTED
     return _TOO_FAR if when > horizon else None

@@ -359,11 +359,10 @@ class SqliteEventStore:
         """Mark started events expired so the sweeper stops considering them.
 
         `grace_hours` is how long after its start an event is still live, and
-        it is REQUIRED rather than defaulted to nothing. The pipeline's date
-        window already keeps a started event for a while, and a default here
-        would let this method and that window answer "has it started" twelve
-        hours apart, which is exactly the split that put an event in the digest
-        and marked it expired in the same run.
+        it is REQUIRED rather than defaulted. The pipeline's date window cuts on
+        its own start grace, and a default here could let this method and that
+        window answer "has it started" differently. When the two were twelve
+        hours apart, one run put an event in the digest and marked it expired.
 
         The exclusion list is State.silences_sweeper spelled out in SQL. It has
         to stay in step: an event the user dismissed and then let start would
