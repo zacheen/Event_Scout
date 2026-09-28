@@ -205,6 +205,11 @@ class SqliteEventStore:
     def close(self) -> None:
         self._conn.close()
 
+    def known_urls(self) -> set[str]:
+        with self._lock:
+            return {canon_url(r[0]) for r in self._conn.execute(
+                "SELECT canonical_url FROM events")}
+
     def reported_urls(self) -> set[str]:
         """Canonical URLs that have ever cleared the digest floor."""
         with self._lock:

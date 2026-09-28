@@ -47,7 +47,7 @@ from eventscout.http import (HttpClient, StubHttpClient, UrllibHttpClient,
                              _decode_body)
 from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
                                  build_ics, format_digest)
-from eventscout import pipeline, protocols
+from eventscout import notifier as notifier_module, pipeline, protocols
 from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
                                 _parse_score,
                                 KeywordScorer, OpenAiScorer)
@@ -1427,6 +1427,92 @@ def offline() -> None:
                   f"mailed {box.mailed}")
         finally:
             db.close()
+
+    section("pipeline - the funnel names never-emailed, not new")
+    # Dry runs mail nothing, so the same event stays in the count run after run.
+    # The note is what separates it from an event this run saw for the first time.
+    with tempfile.TemporaryDirectory() as tmp_label:
+        db = SqliteEventStore(Path(tmp_label) / "label.db")
+        try:
+            outs = []
+            for _ in range(2):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    run([_Once()], db, build_geo(load_channels()), _offline,
+                        _Mailbox(), dry_run=True, now=_T0)
+                outs.append(next((line for line in buf.getvalue().splitlines()
+                                  if "never emailed before" in line), ""))
+            # "never emailed before  <count>  <delta>  <n> first seen this run"
+            check("the first dry run counts the event as first seen",
+                  outs[0].split()[3:4] == ["1"] and "1 first seen this run" in outs[0],
+                  f"line {outs[0]!r}")
+            check("the second still counts it as never emailed, but not first seen",
+                  outs[1].split()[3:4] == ["1"] and "0 first seen this run" in outs[1],
+                  f"line {outs[1]!r}")
+        finally:
+            db.close()
+
+    section("notifier - --show-digest prints exactly the body that was sent")
+    # The printout is only evidence of what was mailed if it is the same string,
+    # not a second rendering of the same sections.
+    class _FakeSmtp:
+        sent = []
+
+        def __init__(self, host, port):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, context=None):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, message):
+            _FakeSmtp.sent.append(message)
+
+    real_smtp = notifier_module.smtplib.SMTP
+    notifier_module.smtplib.SMTP = _FakeSmtp
+    try:
+        _sections = [("OTHER PICKS", [(_event(title="Echoed", start=_SOON),
+                                        Score(fit=5, access_value=5, cost=2),
+                                        Urgency.P1)])]
+        for echo in (True, False):
+            _FakeSmtp.sent.clear()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                EmailNotifier("u@example.test", "pw", "t@example.test",
+                              "America/Los_Angeles", echo=echo).send(
+                    _sections, "[Event Scout] 1 events", "footer text")
+            mailed = _FakeSmtp.sent[0].get_body(("plain",)).get_content().strip()
+            if echo:
+                check("the printed body is the mailed body, footer included",
+                      mailed in buf.getvalue() and "footer text" in mailed,
+                      f"printed {buf.getvalue()[:200]!r}")
+            else:
+                check("and without the flag a send prints nothing",
+                      buf.getvalue() == "", f"printed {buf.getvalue()[:200]!r}")
+    finally:
+        notifier_module.smtplib.SMTP = real_smtp
+    # Read from the source, like the main() checks below, because running
+    # local_run.main would fetch every live source and send real mail.
+    _lr_main = next(n for n in ast.walk(ast.parse(
+        (Path(__file__).parent / "local_run.py").read_text(encoding="utf-8")))
+        if isinstance(n, ast.FunctionDef) and n.name == "main")
+    _flag_read = any(isinstance(n, ast.Compare) and isinstance(n.left, ast.Constant)
+                     and n.left.value == "--show-digest" for n in ast.walk(_lr_main))
+    _echo_kw = [kw.value for n in ast.walk(_lr_main)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "EmailNotifier"
+                for kw in n.keywords if kw.arg == "echo"]
+    check("local_run reads --show-digest and hands it to EmailNotifier as echo",
+          _flag_read and len(_echo_kw) == 1 and isinstance(_echo_kw[0], ast.Name)
+          and _echo_kw[0].id == "show_digest",
+          f"flag read {_flag_read}, echo args {[ast.dump(v) for v in _echo_kw]}")
 
     # "You have not acted on it" vs state 'new' is EventStore.due_for_resweep's
     # third condition -- both the below-floor and the absorbed-alias paths to

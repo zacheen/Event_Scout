@@ -154,7 +154,7 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
 class EmailNotifier:
     def __init__(self, user: str, app_password: str, mail_to: str,
                  timezone_name: str, host: str = "smtp.gmail.com",
-                 port: int = 587):
+                 port: int = 587, echo: bool = False):
         self._user = user
         self._app_password = app_password
         self._mail_to = mail_to
@@ -163,6 +163,10 @@ class EmailNotifier:
         self._zone = display_zone(timezone_name)
         self._host = host
         self._port = port
+        # Prints the body after a successful send. The same string that went
+        # into the message, so the printout is evidence of what was mailed
+        # rather than a second rendering that could drift from it.
+        self._echo = echo
 
     def send(self, sections: list[Section], subject: str, footer: str = "") -> int:
         """Send one digest. Returns the number of events sent; 0 sends nothing."""
@@ -190,6 +194,9 @@ class EmailNotifier:
             server.starttls(context=ssl.create_default_context())
             server.login(self._user, self._app_password)
             server.send_message(message)
+        if self._echo:
+            print(f"\n--- SENT ---\nSubject: {subject}\n")
+            print(body)
         return total
 
 class ConsoleNotifier:

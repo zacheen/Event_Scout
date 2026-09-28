@@ -151,6 +151,14 @@ class EventStore(ScoreCache, Protocol):
     both sets of methods.
     """
 
+    def known_urls(self) -> set[str]:
+        """Canonical URLs the ledger holds a row for, reported or not.
+
+        Answers "was this seen before", which reported_urls cannot, since a
+        dry run records every event it sees and reports none of them.
+        """
+        ...
+
     def reported_urls(self) -> set[str]:
         """Canonical URLs (urls.canon_url) already reported to the user.
 

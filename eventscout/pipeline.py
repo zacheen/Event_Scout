@@ -205,6 +205,9 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     funnel = Funnel()
     # Read before this run marks anything, so its own events still count as new.
     reported_urls = store.reported_urls()
+    # Read at the same moment, before any upsert, to tell an event never seen
+    # from one that earlier dry runs saw and never mailed. Both count as new.
+    known_urls = store.known_urls()
     # Companion to reported_urls (see EventStore.reported_identities for the
     # "same question asked the other way" rationale). _collapse only compares
     # listings within one batch, so without this a second source publishing
@@ -444,7 +447,12 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     store.expire_past(now.isoformat(),
                       int(_START_GRACE.total_seconds() // 3600))
     store.save()
-    funnel.stage("all in scope" if report_all else "new since last run", len(fresh))
+    # "Never emailed", not "new since last run". Dry runs mail nothing, so the
+    # same events stay in this count run after run. One dry run showed 16 here
+    # while the ledger gained a single row, and read as 16 new events.
+    first_seen = sum(1 for e, _, _ in fresh if e.url not in known_urls)
+    funnel.stage("all in scope" if report_all else "never emailed before",
+                 len(fresh), f"{first_seen} first seen this run")
 
     to_send = fresh
     # Carried only by the run that has nothing to compare against, and never

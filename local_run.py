@@ -2,6 +2,8 @@
 
     conda run -n ML python local_run.py            # fetch, score, EMAIL
     conda run -n ML python local_run.py --dry-run  # same, printed instead of sent
+    conda run -n ML python local_run.py --show-digest  # EMAIL, and also print
+                                                  # the body exactly as sent
     conda run -n ML python local_run.py --reset    # forget the ledger, first run
                                                   # again. What that mails is
                                                   # config.yaml first_run.mode;
@@ -100,6 +102,7 @@ def main() -> int:
     args = set(sys.argv[1:])
     dry_run = "--dry-run" in args
     report_all = "--all" in args
+    show_digest = "--show-digest" in args
     if load_dotenv:
         load_dotenv(ROOT / ".env")
 
@@ -128,7 +131,8 @@ def main() -> int:
     else:
         notifier = EmailNotifier(settings.gmail_user, settings.gmail_password,
                                  settings.mail_to,
-                                 settings.display_timezone)
+                                 settings.display_timezone,
+                                 echo=show_digest)
 
     print("=" * 68)
     if dry_run:
