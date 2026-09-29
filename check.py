@@ -1456,6 +1456,39 @@ def offline() -> None:
         finally:
             db.close()
 
+    # The rank is re-read at the sweep, so an event mailed once and since fallen
+    # below the floor gets no LAST CALL, while one still above it does.
+    with tempfile.TemporaryDirectory() as tmp_low:
+        db = SqliteEventStore(Path(tmp_low) / "low.db")
+        box = _Mailbox()
+        _dull = "Friday poker night, cards and drinks with friends"
+        try:
+            for uid, url, text in (("jsonld:high", "https://luma.com/high", _RICH),
+                                   ("jsonld:low", "https://luma.com/low", _dull)):
+                db.upsert(_event(event_uid=uid, url=url, source_kind="jsonld",
+                                 title=text, description=text, start=_SOON,
+                                 location="Palo Alto, CA"))
+                db.mark_alerted([uid], at=_T0.isoformat())
+                db.mark_cleared_floor([uid])
+            db.save()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                run([], db, build_geo(load_channels()), _offline, box,
+                    dry_run=False, now=_later(239))
+            check("a reminded event still above the floor gets its last call",
+                  "https://luma.com/high" in box.mailed, f"mailed {box.mailed}")
+            check("while one now below the floor does not",
+                  "https://luma.com/low" not in box.mailed, f"mailed {box.mailed}")
+            check("and the funnel says one was held back for its rank",
+                  "1 more now below the floor" in buf.getvalue(),
+                  "the withheld reminder left no trace in the report")
+            swept = db._conn.execute(
+                "SELECT swept_at FROM events WHERE event_uid='jsonld:low'").fetchone()[0]
+            check("and it is not marked swept, so a rank that recovers still earns one",
+                  swept == "", f"swept_at={swept!r}")
+        finally:
+            db.close()
+
     section("pipeline - the funnel names never-emailed, not new")
     # Dry runs mail nothing, so the same event stays in the count run after run.
     # The note is what separates it from an event this run saw for the first time.

@@ -494,6 +494,7 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
         already = {e.event_uid for e, _, _ in to_send}
         already_same = {key for e, _, _ in to_send
                         if (key := _same_event_key(e)) is not None}
+        below_floor_due = 0
         for event in store.due_for_resweep(
                 settings.urgent_hours, now.isoformat(),
                 min_gap_hours=settings.resweep_min_gap_hours):
@@ -507,6 +508,13 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
             score = _safe_score(scorer, event)
             if score is None:
                 continue
+            # The rank is re-read here because it moves after the first mail,
+            # and LAST CALL says it is the only reminder an event will get. One
+            # went to an event ranked 1, capped because the reader could not
+            # attend it. Not marked swept, so a rank that recovers still earns it.
+            if score.rank < settings.digest_min_rank:
+                below_floor_due += 1
+                continue
             reminders.append((event, score, urgency_engine.classify(event, score, now)))
             # Accumulated, not fixed up front: two aliases of one event can both
             # be due, and a set built only from to_send cannot separate them
@@ -515,9 +523,11 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
             already.add(event.event_uid)
             if key is not None:
                 already_same.add(key)
-        if reminders:
+        if reminders or below_floor_due:
             funnel.added("closing soon, never acted on", len(reminders),
-                         "already reported once, starting soon, never acted on")
+                         "already reported once, starting soon, never acted on"
+                         + (f", {below_floor_due} more now below the floor"
+                            if below_floor_due else ""))
 
     print(render_funnel(funnel))
     sent = _deliver(Digest(to_send, reminders, cleared, seeding,
