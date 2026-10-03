@@ -15,11 +15,11 @@ Only the three commands below may run during a scheduled run. Commands 1 and 2 m
 
 1. `conda run --no-capture-output -n ML python "D:\dont_move\git_save\Event_Scout\scheduled_check.py" run`
 2. `conda run --no-capture-output -n ML python "D:\dont_move\git_save\Event_Scout\scheduled_check.py" snapshot`
-3. `powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "Event Scout found a problem today / see the scheduled run report" -Title "Event Scout"`
+3. `powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "Event Scout 今日執行發現問題 / 請看排程任務報告" -Title "Event Scout"`
 
 ## Running
 
-- Run command 1 with the Bash tool and `timeout` set to 600000. In order, it records the start time in UTC, prints the ledger snapshot before the run, runs `local_run.py --show-digest` (which really sends mail), prints the snapshot after the run and the differences, lists the rows this run wrote to `alerted_at` and `swept_at`, and prints how many `cleared_floor_at` values it wrote.
+- Run command 1 with the Bash tool and `run_in_background` set to true. It takes about 11 minutes, which is longer than the Bash tool's 10-minute foreground limit. Do not poll or sleep while it runs, since any command off the closed list stops at a permission prompt. Wait for the completion notification, then read the output file it names with the Read tool. In order, the command records the start time in UTC, prints the ledger snapshot before the run, runs `local_run.py --show-digest` (which really sends mail), prints the snapshot after the run and the differences, lists the rows this run wrote to `alerted_at` and `swept_at`, and prints how many `cleared_floor_at` values it wrote.
 - The full output of `local_run.py` is in `D:\dont_move\git_save\Event_Scout\.private\scheduled_run.log`. Read all of it with the Read tool, not just the end.
 - Command 2 is read-only and prints only the current ledger counts and config thresholds. Use it only when you need to look again.
 

@@ -9,6 +9,6 @@ That file is the only source of rules for this task. Do not act from memory or g
 
 If that file cannot be read, do not guess what to do, and do not start the local run. Instead run the line below **with the Bash tool** to send a toast, keeping the string exactly as written.
 
-powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "Event Scout run stalled / SCHEDULED_RUN.md not found / needs attention" -Title "Event Scout"
+powershell.exe -NoProfile -File "D:\dont_move\git_save\Daily_Task\shared\notify.ps1" -Message "Event Scout 排程停擺 / 找不到 SCHEDULED_RUN.md / 需人工處理" -Title "Event Scout"
 
 Then stop. This toast is the only notification channel.
