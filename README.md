@@ -95,6 +95,18 @@ sent would turn one refused SMTP call into permanent silence.
 Nothing is required to get a first result. Without credentials the digest prints to
 the console instead of being mailed, and says so in its first lines.
 
+## Scheduled daily run
+
+A Claude Code scheduled task, `event-scout-daily-run`, does the local run every day at 3 PM and checks its output. Its rules are in `SCHEDULED_RUN.md`, which the run reads afresh every time, so an edit there takes effect on the next run with no further step.
+
+The app reads the task's prompt from `~/.claude/scheduled-tasks/event-scout-daily-run/SKILL.md`, which lies outside this repo and has no history. That prompt is only a stub pointing at `SCHEDULED_RUN.md`, and its source is `Scheduled_Tasks/event-scout-daily-run.md`. After editing the source, copy it into place with the deploy tool from the Daily_Task repo, which also appends the paragraph that sets the reply language. Run it from this repo's root, with Daily_Task checked out beside this repo.
+
+```bash
+conda run --no-capture-output -n ML python ../Daily_Task/shared/deploy_skills.py .
+```
+
+It prints `deployed` or `up to date`, and adding `--check` compares without writing. Never edit the deployed SKILL.md directly. The tool notices such an edit, prints the diff and refuses to overwrite it until it is rerun with `--replace-edited event-scout-daily-run`, which is also how the stub goes back after the task is recreated in the app.
+
 ## Configuration
 
 | File | Holds |
