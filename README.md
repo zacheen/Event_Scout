@@ -6,21 +6,24 @@ Career fairs, employer info sessions, hackathons and campus recruiting events ar
 
 ## How it works
 
-One pass runs the following stages, and every stage reports how many items it dropped.
+One pass runs the following stages, and every stage that filters reports how many items it dropped.
 
 | Stage | What it does |
 | --- | --- |
 | Fetch | Each configured source returns whatever it currently lists |
 | URL dedupe | Canonical URLs collapse, with tracking parameters stripped |
-| Extraction | Items missing a date or location get one page fetch, read by an LLM |
+| Extraction | Items missing a date or location get one page fetch. Schema.org markup on the page is read first, and an LLM reads the page only when that markup yields no usable event and a model tier is available. Nothing is dropped here |
 | Event dedupe | Same title plus the same start instant collapses across sources |
-| Geo filter | Anything outside the configured radius is dropped, virtual events pass |
+| Geo filter | A location that names a Bay Area city or region passes, and one that names a place elsewhere is dropped. Virtual events pass when `accept_virtual` is on |
 | Horizon | Events already started, or further out than `lookahead_days`, are dropped |
 | Keyword gate | Mailbox items must contain one term from `config.yaml` |
 | Scoring | Each survivor gets a rank, and everything below the floor is withheld |
-| Digest | One mail, split into a closing-soon section and a general section |
+| Sold out | Events whose listing says they are full are withheld |
+| Already reported | Events an earlier run already marked as reported are withheld, matched by URL or by title plus start |
+| First run | While no event has ever been marked as reported, `first_run.mode` in `config.yaml` decides whether the whole backlog is mailed or only recently published items |
+| Digest | One mail with up to four sections. Top picks closing soon, other picks, a below-the-floor section shown once on the first run, and last-call reminders for events mailed before |
 
-A run with nothing new sends no mail at all. That makes silence a signal, which is the whole reason the counts above matter. A source that quietly returns nothing looks exactly like a quiet week, so every source raises rather than returning an empty list when it fails, and a source that can truncate its own read has to report what it could not reach.
+A run with nothing new and no last-call reminder due sends no mail at all. That makes silence a signal, which is the whole reason the counts above matter. A source that quietly returns nothing looks exactly like a quiet week, so a source raises rather than returning an empty list when its fetch fails, and a source that can truncate its own read has to report what it could not reach. Two gaps remain. A page that loads but carries no events still returns an empty list, which is why `check.py` asserts lower bounds on counts. A Gmail entry with no credentials is skipped with a printed line rather than raised. Source failures fail the run as a whole only when every source fails.
 
 ## Sources
 
@@ -29,7 +32,7 @@ Four adapters cover every channel, so adding a site is usually a config entry ra
 - `jsonld` reads schema.org `Event` markup. Dates arrive as typed fields, which removes the largest correctness risk in the project, namely a model guessing a date or a timezone.
 - `wordpress_rest` reads a site's `/wp-json` event post type.
 - `newsletter` reads a beehiiv publication's public archive and harvests the event links out of each issue.
-- `gmail_label` reads one Gmail label over IMAP with an app password. Only SEARCH and FETCH are issued, the mailbox is selected read-only, and bodies use `BODY.PEEK`, so nothing is marked as read. A Gmail rule decides what lands in the label, which means a new newsletter needs no code change at all.
+- `gmail_label` reads one Gmail label over IMAP with an app password. It opens All Mail read-only and searches it for the label, issues no command that changes the mailbox, and fetches bodies with `BODY.PEEK`, so nothing is marked as read. A Gmail rule decides what lands in the label, which means a new newsletter needs no code change at all.
 
 `channels.yaml` holds the inventory. Entries are started only when their `status` is exactly `verified`, so a source that was probed but held back costs nothing.
 
@@ -39,7 +42,7 @@ Two axes, multiplied, giving `rank = fit * access_value` on a 1 to 100 scale.
 
 `fit` is topical relevance to the profile. `access_value` asks whether attending creates a real pathway to a named employer. The second axis is what separates a generic resume workshop from the same workshop where one company reviews resumes for direct consideration.
 
-Three tiers run in precedence order. The OpenAI API is used when a key is present, otherwise a local `codex` CLI, otherwise a deterministic keyword tier. Only the keyword tier is always available, so a run never fails for want of a model.
+Three tiers run in precedence order. The OpenAI API is used when a key is present, otherwise a local `codex` CLI, otherwise a deterministic keyword tier. Only the keyword tier is always available, so a missing model never stops a run. A model that is present but failing is not replaced by the keyword tier. The events it fails to score are dropped for that run, and when every event fails the run exits with an error.
 
 Rank decides three things. Whether the event reaches the digest at all, whether it is marked P0, P1 or P2, and whether it earns a last-call reminder before its date.
 
@@ -84,11 +87,11 @@ It prints `deployed` or `up to date`, and adding `--check` compares without writ
 | `config.yaml` | Keywords, score thresholds, horizon, delivery |
 | `.env` | Every secret, and which mailbox and labels to read |
 
-Credentials and mailbox labels belong in `.env`, which is ignored by Git. Mailbox sources use anonymous display names and do not copy sender headers into events. The local database, profile and run logs remain private files. Share the tracked source files, never a ZIP of the entire working directory.
+Credentials and mailbox labels belong in `.env`, which is ignored by Git. Mailbox sources are named after their label and keep the sender's From header as the event's organizer, which scoring reads. Both stay in the local ledger and are stripped only when the cloud ledger is exported. The local database, profile and run logs remain private files. Share the tracked source files, never a ZIP of the entire working directory.
 
 LLM scoring sends the configured profile and event text to the selected model provider, including mailbox text when those events are scored. A CLI invocation does not make inference local. Use the keyword tier if that transfer is unwanted.
 
-`channels.yaml` is tuned for one reader, a Bay Area based student in US tech. The geo anchors are South Bay centred at a 50 mile radius, which still reaches San Francisco, Oakland and Berkeley. Retuning means editing the anchors and the source list, not the code.
+`channels.yaml` is tuned for one reader, a Bay Area based student in US tech. The geo filter matches location strings against a list of Bay Area city and region names in `eventscout/geo.py`. The anchors in `channels.yaml`, South Bay centred at a 50 mile radius that still reaches San Francisco, Oakland and Berkeley, state the intended scope but are not consulted yet, because no source exposes coordinates and no geocoder is wired in. Retuning the area means editing that city list, and retuning the sources means editing `channels.yaml`.
 
 ## Cloud
 
@@ -96,7 +99,7 @@ LLM scoring sends the configured profile and event text to the selected model pr
 
 Before enabling cloud runs, create that private repository and configure Actions secrets `LEDGER_REPOSITORY` (`owner/repository`) and `LEDGER_TOKEN` (a token with Contents read/write access to that repository). The existing mail credentials and `RESUME_TEXT` are also required; set `RESUME_TEXT` to the approved profile version. The workflow verifies repository visibility before fetching and again before saving. Missing configuration, a public destination or a changed remote fails closed. The code repository token only needs read access.
 
-Exports omit descriptions, organizer headers and scoring reasons from both tables, and replace mailbox source labels with `gmail_label`. Remaining titles, URLs and attendance state are still private. Detailed scan output is withheld from Actions logs and is not uploaded as an artifact. Existing recipient query parameters must also be removed from legacy data before it is shared.
+Exports omit descriptions and organizer headers from the events table and scoring reasons from both tables, and replace mailbox source labels with `gmail_label`. Remaining titles, URLs and attendance state are still private. Detailed scan output is withheld from Actions logs and is not uploaded as an artifact. Existing recipient query parameters must also be removed from legacy data before it is shared.
 
 ## Daily routine
 
