@@ -83,6 +83,9 @@ _EXTRACT_SCHEMA = {
 # keyword gate and makes the digest unreadable.
 _PROSE_KINDS = frozenset({"newsletter", "gmail_label"})
 
+# Tiers whose start comes from a typed startDate, so extraction never replaces it.
+_TYPED_START_KINDS = frozenset({"jsonld"})
+
 
 class PageFactExtractor:
     """Fills start/end/location for undated events by reading their own page.
@@ -149,7 +152,8 @@ class PageFactExtractor:
             # different evidence strength, because _facts_from_jsonld's own
             # matching rule already filters out ambiguous candidates before
             # either reaches here.
-            return replace(event, **typed)
+            typed = self._keep_typed_dates(event, typed)
+            return replace(event, **typed) if typed else event
         # Everything above this line is free and needs no model. Returning the
         # event here rather than earlier is what keeps page_unreadable and the
         # typed path working on a keyword-only run.
@@ -169,13 +173,33 @@ class PageFactExtractor:
             # undated event is still worth reporting.
             log.warning("extraction failed for %s: %s", event.url, exc)
             return event
-        patch = self._parse(raw, text)
+        patch = self._keep_typed_dates(event, self._parse(raw, text))
         title = self._prose_title(patch.pop("title", ""), event.source_kind)
         if title:
             patch["title"] = title
         # Identity, not truthiness: the pipeline skips re-filtering when an
         # extractor returns the object it was given.
         return replace(event, **patch) if patch else event
+
+    @staticmethod
+    def _keep_typed_dates(event: Event, patch: dict) -> dict:
+        """`patch` minus start and end when the source already typed a start.
+
+        Such an event reached extraction for its location alone, so the page
+        has no business re-dating it. Measured on cerebralvalley.ai, whose
+        online listings carry a VirtualLocation that flattens to no location:
+        the linked page had no Event markup, and the model read "October 5" as
+        local midnight, overwriting the source's 01:00 PDT. A midnight with a
+        clock time is not a bare date, so the row did not become all-day either.
+
+        Only for _TYPED_START_KINDS. A WordPress start can be the post date,
+        which is the case extract's overwrite exists to correct. End goes with
+        start, because pairing one source's start with another's end is how
+        _stamp_naive's end-before-start case arises.
+        """
+        if not event.start or event.source_kind not in _TYPED_START_KINDS:
+            return patch
+        return {k: v for k, v in patch.items() if k not in ("start", "end")}
 
     def _page_html(self, event: Event) -> str | None:
         """The event's own page, or None when the site would not give it to us.

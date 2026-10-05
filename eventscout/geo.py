@@ -89,13 +89,24 @@ class GeoFilter:
         # accept_virtual false changed nothing for it. An earlier review
         # proposed rejecting these outright instead, which would drop the online
         # events this flag exists to keep.
-        if self._is_virtual(event) or self._states_nowhere(event.location):
+        if self._text_says_virtual(event.location) or self._states_nowhere(event.location):
             return self._accept_virtual
-        # Below here the location matched no Bay Area name. Both remaining
-        # fallbacks apply only when it names nowhere at all, so an event that
-        # explicitly says somewhere else is out regardless of either.
+        # A named non-Bay-Area city beats an online attendance MODE, as
+        # _VIRTUAL_HINTS gives text precedence over the mode. cerebralvalley.ai
+        # marks World AI Week online (VirtualLocation) while its own page names
+        # Amsterdam, which the extractor wrote into the location. Testing the
+        # mode first mailed it as a normal pick. Cost, an online listing located
+        # at its organizer's non-Bay-Area city is now dropped too. A 415-row
+        # ledger held only two online rows naming any place, Amsterdam and
+        # Dubai, both from cerebralvalley.ai.
+        #
+        # Both remaining fallbacks also apply only when the location names
+        # nowhere at all, so an event that says somewhere else is out
+        # regardless of either.
         if self._names_a_place(event.location):
             return False
+        if event.is_virtual:
+            return self._accept_virtual
         # An unread page states no location because nothing could be read, not
         # because the event is elsewhere; dropping it here is the silent miss
         # this project exists to prevent, so it goes on to be scored instead.
@@ -117,10 +128,9 @@ class GeoFilter:
         """
         return min(_haversine_mi(lat, lon, a.lat, a.lon) for a in self._anchors)
 
-    def _is_virtual(self, event: Event) -> bool:
-        if event.is_virtual:
-            return True
-        text = (event.location or "").lower()
+    @staticmethod
+    def _text_says_virtual(location: str) -> bool:
+        text = (location or "").lower()
         return any(hint in text for hint in _VIRTUAL_HINTS)
 
     @staticmethod

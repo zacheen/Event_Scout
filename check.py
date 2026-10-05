@@ -2861,6 +2861,16 @@ def offline() -> None:
         ("a Bay Area city is kept regardless of feed",
          _event(source="other", location="San Francisco, CA",
                 attendance_mode=AttendanceMode.OFFLINE), True),
+        # The World AI Week case in keep()'s comment.
+        ("a named other city beats an online mode",
+         _event(source="other", location="Amsterdam, Netherlands",
+                attendance_mode=AttendanceMode.ONLINE), False),
+        ("an online mode with no location still follows accept_virtual",
+         _event(source="other", location="",
+                attendance_mode=AttendanceMode.ONLINE), True),
+        ("location text 'Virtual' is kept beside a place name",
+         _event(source="other", location="Virtual, New York, NY",
+                attendance_mode=AttendanceMode.ONLINE), True),
     ]
     for rule, ev, want in cases:
         check(rule, geo.keep(ev) is want)
@@ -3084,6 +3094,42 @@ def offline() -> None:
     relative = _extract(_ld("/x"))
     check("a node referring to itself by a relative url still matches",
           relative.start == "2026-09-20T18:00:00-07:00", f"got {relative.start!r}")
+
+    # See _keep_typed_dates: a JSON-LD start is never re-dated by the page.
+    def _extract_located(html, source_kind, invoker):
+        event = _event(event_uid=f"{source_kind}:https://luma.com/x",
+                       url="https://luma.com/x", source_kind=source_kind,
+                       start="2026-10-05T01:00:00-07:00",
+                       end="2026-10-07T10:00:00-07:00", location="")
+        return PageFactExtractor(invoker, _Page(html)).extract(event)
+
+    class _MidnightReader:
+        def json_call(self, system, user, schema, name):
+            return ('{"title": "", "start": "2026-10-05T00:00:00-07:00", '
+                    '"end": "2026-10-07T00:00:00-07:00", '
+                    '"location": "Amsterdam, Netherlands", '
+                    '"rsvp_deadline": "", "organizer": ""}')
+
+    _prose_page = "<html><body><p>October 5 to 7 in Amsterdam.</p></body></html>"
+    kept = _extract_located(_prose_page, "jsonld", _MidnightReader())
+    check("a JSON-LD start survives a prose extraction run for the location",
+          kept.start == "2026-10-05T01:00:00-07:00"
+          and kept.end == "2026-10-07T10:00:00-07:00",
+          f"start={kept.start!r} end={kept.end!r}")
+    check("and the location it was run for is still filled",
+          kept.location == "Amsterdam, Netherlands", f"got {kept.location!r}")
+    typed_kept = _extract_located(
+        _ld("https://luma.com/x", start="2026-10-05T00:00:00-07:00"), "jsonld",
+        _Refuser())
+    check("a JSON-LD start survives the typed path too",
+          typed_kept.start == "2026-10-05T01:00:00-07:00"
+          and typed_kept.location == "San Jose, CA",
+          f"start={typed_kept.start!r} location={typed_kept.location!r}")
+    redated = _extract_located(
+        _ld("https://luma.com/x", start="2026-10-05T00:00:00-07:00"),
+        "wordpress_rest", _Refuser())
+    check("a WordPress start is still corrected by the event's own page",
+          redated.start == "2026-10-05T00:00:00-07:00", f"got {redated.start!r}")
 
     section("extract - an unreadable page must yield nothing, not a guess")
     # Same fabrication _page_text's docstring measures (tesla.com 403 -> a
