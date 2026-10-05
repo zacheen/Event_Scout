@@ -135,10 +135,10 @@ display_timezone: "America/Los_Angeles"
 lookahead_days: 120
 
 # --- Delivery --------------------------------------------------------------
-# One email a day, split into a closing-soon section and a general section.
+# At most one email per run, with up to four sections (see notifier.py).
 # Chosen over three separate sweeper emails because there is no push channel,
 # and three mails a day for one event reads as spam rather than urgency. The
-# send time is the workflow's cron, not a setting here.
+# send time is whatever schedules the run, not a setting here.
 urgent_section_within_hours: 72
 # The shortest time between an event's first mail and its LAST CALL. Without it
 # an event first mailed just before the window opens is reminded on the very

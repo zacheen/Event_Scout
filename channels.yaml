@@ -59,17 +59,17 @@
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Geo filter. South Bay centred, NOT San Francisco centred. A 50mi radius from
-# these three still reaches SF, Oakland and Berkeley, so city-name matching
-# alone would be both too narrow (misses Palo Alto, Sunnyvale, Fremont) and too
-# broad (matches any "San Francisco Bay Area" string on a remote listing).
+# Geo filter. South Bay centred, NOT San Francisco centred. The anchors state
+# the intended scope, a 50mi radius from these three that still reaches SF,
+# Oakland and Berkeley. GeoFilter.keep does not read them yet and matches the
+# Bay Area city and region names in geo.py instead, see the note below.
 # ---------------------------------------------------------------------------
 geo:
   anchors:
     - {label: "San Jose, CA",      lat: 37.336157, lon: -121.890608, radius_mi: 50}
     - {label: "Mountain View, CA", lat: 37.393816, lon: -122.078961, radius_mi: 50}
     - {label: "Santa Clara, CA",   lat: 37.352310, lon: -121.961900, radius_mi: 50}
-  # Virtual events bypass the radius test entirely.
+  # An online event that names no Bay Area city passes only when this is true.
   # For JSON-LD sources this is `eventAttendanceMode` == OnlineEventAttendanceMode.
   accept_virtual: true
   # Every source here exposes only a city string (Cerebral Valley's

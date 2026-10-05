@@ -8,7 +8,8 @@ the two environments differ in ways a flag cannot paper over.
                      across runs on this disk    repository, exported back after
   scorer             codex CLI, no API key       OpenAI API; codex does not exist
                      needed                      on a GitHub runner
-  extraction         on                          only with OPENAI_API_KEY
+  extraction         schema.org, then a model    schema.org only, unless
+                     for the rest                OPENAI_API_KEY is set
   email              opt-in via --dry-run        always sends
   reporting          --all shows everything      new events only
 
@@ -52,8 +53,8 @@ def main() -> int:
         return 1
     if not settings.openai_api_key:
         print("NOTICE: OPENAI_API_KEY is not set. The codex CLI does not exist on "
-              "a runner, so scoring falls back to keywords and date extraction is "
-              "disabled. Expect weaker ranking than a local run.")
+              "a runner, so scoring falls back to keywords and only the schema.org "
+              "half of date extraction runs. Expect weaker ranking than a local run.")
 
     if DB.exists():
         DB.unlink()   # always rebuild from the committed text mirror

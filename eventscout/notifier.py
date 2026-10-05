@@ -1,8 +1,10 @@
 """Digest email with .ics attachments.
 
-One message per run, split into a closing-soon section and a general section.
-Chosen over separate per-urgency emails because there is no push channel, and
-three messages a day about one event reads as spam rather than urgency.
+One message per run, with up to four sections: top picks closing soon, other
+picks, a below-the-floor section (first run only) and last-call reminders for
+events mailed before. Chosen over separate per-urgency emails because there is
+no push channel, and three messages a day about one event reads as spam rather
+than urgency.
 """
 from __future__ import annotations
 
