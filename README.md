@@ -98,6 +98,16 @@ Before enabling cloud runs, create that private repository and configure Actions
 
 Exports omit descriptions, organizer headers and scoring reasons from both tables, and replace mailbox source labels with `gmail_label`. Remaining titles, URLs and attendance state are still private. Detailed scan output is withheld from Actions logs and is not uploaded as an artifact. Existing recipient query parameters must also be removed from legacy data before it is shared.
 
+## Daily routine
+
+On the author's workstation Event Scout is the first half of a routine run by Claude Code scheduled tasks. The second half lives in [Daily_Task](https://github.com/zacheen/Daily_Task).
+
+1. A scheduled agent runs the Event Scout code, which searches every verified source, scores each career event for relevance and mails the result, so the reader can decide which events to attend.
+2. The same agent then checks that the run itself went correctly. It reads the funnel counts, the digest that went out and the ledger columns this run wrote, and compares them against the rules in `SCHEDULED_RUN.md`.
+3. Another scheduled agent, the important-mail check in [`Email_Check`](https://github.com/zacheen/Daily_Task/tree/main/Email_Check), reads the inbox over IMAP through a Gmail MCP server the author wrote and picks out mail that asks the reader to act, such as an event they registered for, an employer's own recruiting session, a registration form or a bill to pay.
+4. It checks the reader's calendar feeds for events already on the schedule, using [`calendar_check.py`](https://github.com/zacheen/Daily_Task/blob/main/Email_Check/calendar_check.py).
+5. It hands its decisions to a Python state machine, [`statemachine.py`](https://github.com/zacheen/Daily_Task/blob/main/Email_Check/statemachine.py), which updates the to-do list.
+
 ## Tests
 
 ```bash
