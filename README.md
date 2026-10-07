@@ -93,7 +93,8 @@ LLM scoring sends the configured profile and event text to the selected model pr
 
 `channels.yaml` is tuned for one reader, a Bay Area based student in US tech.
 
-- The geo filter keeps an event whose location names one of the places under `geo.places`, which lists the cities within 50 miles of San Jose, Mountain View and Santa Clara. It matches names rather than distance, because no source exposes coordinates.
+- The geo filter keeps an event whose location names one of the places under `geo.places`, which lists the cities within 50 miles of San Jose, Mountain View and Santa Clara, plus a few campuses. It matches names rather than distance, because no source exposes coordinates.
+- `geo.accept_virtual` only adds events back. With it on, an online event that names no Bay Area city passes, and so does any event whose location says remote only. An event naming a Bay Area city without saying remote only is kept either way.
 - A name that another state or country also uses is listed with its state, such as `dublin, ca`, so Dublin, Ireland is dropped.
 - `geo.search_area` records the same 50 mile area for a future source whose query takes a centre and a distance. No verified source does, so nothing reads it yet.
 - Retuning the area means editing `geo.places`, and retuning the sources means editing the rest of `channels.yaml`. Neither needs a code change.

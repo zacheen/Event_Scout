@@ -2895,6 +2895,15 @@ def offline() -> None:
               gf.keep(_event(source="other", location="Online, San Francisco, CA",
                              attendance_mode=AttendanceMode.ONLINE)),
               "a hybrid in SF was dropped")
+        check(f"a city beside 'anywhere' is kept at accept_virtual {accept}",
+              gf.keep(_event(source="other",
+                             location="In person in San Jose or join from anywhere",
+                             attendance_mode=AttendanceMode.OFFLINE)),
+              "a hybrid in San Jose was dropped")
+        got = gf.keep(_event(source="other", location="Remote only, San Francisco, CA",
+                             attendance_mode=AttendanceMode.OFFLINE))
+        check(f"'remote only' beside a city follows accept_virtual {accept}",
+              got is accept, f"kept={got}")
         check(f"a venue-only in-region name is untouched at accept_virtual "
               f"{accept}",
               gf.keep(_event(source="in-region", location="Welcome Center",
@@ -2919,6 +2928,9 @@ def offline() -> None:
         ("a city past 50 miles is dropped", "Napa, CA", False),
         ("a core city still matches without its state", "SJSU Student Union, San Jose",
          True),
+        ("a same-named city in another state is dropped", "Dublin, OH", False),
+        ("a campus named without its city is kept", "UC Santa Cruz, Baskin Engineering",
+         True),
     ]
     for why, loc, want in deployed:
         got = bay.keep(_event(source="other", location=loc,
@@ -2940,6 +2952,11 @@ def offline() -> None:
             refused = True
         check(f"{why} is refused rather than built", refused,
               "it built, so the filter would keep or drop the wrong events silently")
+    padded = GeoFilter((" san jose ",), accept_virtual=True)
+    check("a padded place entry still matches",
+          padded.keep(_event(source="other", location="San Jose, CA",
+                             attendance_mode=AttendanceMode.OFFLINE)),
+          "the entry compiled with its spaces and can never match")
 
     section("extract - typed markup beats asking a model to read prose")
     # See PageFactExtractor's class docstring for the measured split behind
@@ -2986,6 +3003,9 @@ def offline() -> None:
           f"got {typed.location!r}")
     check("a prose-tier title is replaced by the event's real name",
           typed.title == "Real Name", f"got {typed.title!r}")
+    entity_title = _extract(_ld("https://luma.com/x", name="Move &#038; Release"))
+    check("and an entity in that name is decoded on the way in",
+          entity_title.title == "Move & Release", f"got {entity_title.title!r}")
 
     # The keyword-only run, which on a GitHub runner is every run made without
     # OPENAI_API_KEY, since the codex CLI does not exist there. build_runtime
@@ -3275,6 +3295,12 @@ def offline() -> None:
           entity_ev.title == "Move & Release", f"title {entity_ev.title!r}")
     check("and in a location", entity_ev.location == "Rooms 1010 & 1011",
           f"location {entity_ev.location!r}")
+    numeric_stub = StubHttpClient({"http://t/": '''<script type="application/ld+json">
+    {"@type":"Event","name":2026,"url":"https://t/n"}
+    </script>'''})
+    numeric = JsonLdSource("stub", "http://t/", numeric_stub).fetch()
+    check("a numeric name still becomes a title rather than dropping its event",
+          [e.title for e in numeric] == ["2026"], f"got {[e.title for e in numeric]!r}")
 
     section("sources.gmail_label - a dead mailbox must not look like a quiet one")
     # imap.uid can fail two ways (see GmailLabelSource._events_in_message's

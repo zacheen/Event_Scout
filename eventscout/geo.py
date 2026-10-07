@@ -6,12 +6,16 @@ from collections.abc import Sequence
 
 from .models import Event
 
-# Rejects a location naming no fixed venue at all, e.g. "Remote only"; a city
-# listed alongside others still passes, e.g. "San Francisco, New York, or
-# remote". Broadening to bare "remote" was rejected without data: Bay Area
-# hybrid events routinely say "in-person or remote", and excluding those would
-# lose real events to catch a phrasing not yet observed in any verified feed.
-_NEGATIVE = ("remote only", "anywhere", "worldwide")
+# Marks a location naming no fixed venue at all, which accept_virtual decides.
+# Only "remote only" also stops a named Bay Area city from counting, because it
+# says the event cannot be attended in person. "Anywhere" and "worldwide" sit
+# beside a city in hybrid listings ("In person in San Jose or join from
+# anywhere"), and such an event is attendable whatever accept_virtual says.
+# Broadening to bare "remote" was rejected without data: Bay Area hybrid events
+# routinely say "in-person or remote", and excluding those would lose real
+# events to catch a phrasing not yet observed in any verified feed.
+_REMOTE_ONLY = "remote only"
+_NEGATIVE = (_REMOTE_ONLY, "anywhere", "worldwide")
 
 # A location that names no place because the event has none. Measured on
 # studentlife.bayarea.northeastern.edu, which sets eventAttendanceMode to
@@ -66,12 +70,14 @@ class GeoFilter:
         self._regional_sources = regional_sources
 
     def keep(self, event: Event) -> bool:
-        # A named Bay Area city wins over everything, INCLUDING virtual. A
-        # hybrid listed as "Online, San Francisco, CA" is attendable in person,
-        # so accept_virtual must not get to decide it.
+        # A named Bay Area city wins over everything, INCLUDING virtual, unless
+        # the text says remote only. A hybrid listed as "Online, San Francisco,
+        # CA" is attendable in person, so accept_virtual must not get to decide
+        # it. accept_virtual only adds events back.
         if self._matches_name(event.location):
             return True
-        # Everything below here named no Bay Area city. An event whose location
+        # Everything below here did not match by name, because no Bay Area city
+        # is named or because the text says remote only. An event whose location
         # text says it is online, or names nowhere on earth ("Remote only",
         # "Worldwide"), is accept_virtual's decision and nothing else's. Falling through
         # instead reached the two fallbacks, which answer different questions:
@@ -119,17 +125,18 @@ class GeoFilter:
     def _states_nowhere(location: str) -> bool:
         """Does this location name something that is not a place?
 
-        Beside _matches_name because the two read the same _NEGATIVE list for
-        different questions. This one asks "is this a non-place", that one asks
-        the weaker "does this prove Bay Area presence", so a term added for
-        either cannot be missed by the other.
+        Reads all of _NEGATIVE, while _matches_name reads only _REMOTE_ONLY,
+        because "anywhere" beside a named city still describes an event that
+        can be attended in person. Every term _matches_name refuses on must
+        also be in _NEGATIVE, or a refused location falls through to the
+        fallbacks and an in_region source keeps it as local.
         """
         text = _normalise(location)
         return any(n in text for n in _NEGATIVE)
 
     def _matches_name(self, location: str) -> bool:
         text = _normalise(location)
-        if not text or any(n in text for n in _NEGATIVE):
+        if not text or _REMOTE_ONLY in text:
             return False
         return any(p.search(text) for p in self._place_patterns)
 
