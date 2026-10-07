@@ -26,6 +26,11 @@ Only the three commands below may run during a scheduled run. Commands 1 and 2 m
 ## What to check
 
 - Whether command 1 prints `local_run.py --show-digest exit code: 0`, and whether the log contains `EMAIL SENT`.
+- The FETCH table near the top of the log, which has one line per source. Read every line rather than trusting the exit code, because the exit code stays 0 when at least one source succeeds (Known_concern.md #6).
+  - A line carrying `ERROR` means that source failed and the run went on without it. It is a problem.
+  - A line ending in `<-- returned nothing` means a source that did not fail found no events, which is also what a source whose page format changed looks like. It is a problem too.
+  - The exception is a Luma source whose line reads `HTTP Error 429`, which is rate limiting as Rule sources item 1 says. Mention it in the report but do not count it as a problem.
+  - Each problem found here gets the toast, and the report names the source and quotes its line.
 - Whether every FUNNEL stage adds up, and whether the `N first seen this run` after `never emailed before` is plausible.
 - The printed digest is everything after `--- SENT ---`. Check each of the following.
   - The section order is TOP PICKS, OTHER PICKS, with LAST CALL at the end.
