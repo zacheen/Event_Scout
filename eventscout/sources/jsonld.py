@@ -45,7 +45,7 @@ class JsonLdSource:
 
     def _to_event(self, node: dict) -> Event | None:
         url = canon_url(str(node.get("url") or node.get("@id") or ""))
-        title = str(node.get("name") or "").strip()
+        title = flatten_text(node.get("name"))
         if not url or not title:
             return None
         return Event(

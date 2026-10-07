@@ -91,7 +91,12 @@ Credentials and mailbox labels belong in `.env`, which is ignored by Git. Mailbo
 
 LLM scoring sends the configured profile and event text to the selected model provider, including mailbox text when those events are scored. A CLI invocation does not make inference local. Use the keyword tier if that transfer is unwanted.
 
-`channels.yaml` is tuned for one reader, a Bay Area based student in US tech. The geo filter matches location strings against a list of Bay Area city and region names in `eventscout/geo.py`. The anchors in `channels.yaml`, South Bay centred at a 50 mile radius that still reaches San Francisco, Oakland and Berkeley, state the intended scope but are not consulted yet, because no source exposes coordinates and no geocoder is wired in. Retuning the area means editing that city list, and retuning the sources means editing `channels.yaml`.
+`channels.yaml` is tuned for one reader, a Bay Area based student in US tech.
+
+- The geo filter keeps an event whose location names one of the places under `geo.places`, which lists the cities within 50 miles of San Jose, Mountain View and Santa Clara. It matches names rather than distance, because no source exposes coordinates.
+- A name that another state or country also uses is listed with its state, such as `dublin, ca`, so Dublin, Ireland is dropped.
+- `geo.search_area` records the same 50 mile area for a future source whose query takes a centre and a distance. No verified source does, so nothing reads it yet.
+- Retuning the area means editing `geo.places`, and retuning the sources means editing the rest of `channels.yaml`. Neither needs a code change.
 
 ## Cloud
 

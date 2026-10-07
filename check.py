@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eventscout.config import (_parse_labels, build_geo, build_runtime, build_sources,
                                load_channels,
                                load_settings)
-from eventscout.geo import Anchor, GeoFilter
+from eventscout.geo import GeoFilter
 from eventscout.http import (HttpClient, StubHttpClient, UrllibHttpClient,
                              _decode_body)
 from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
@@ -2842,7 +2842,7 @@ def offline() -> None:
           _got.start.startswith("2026-09-03T14:00:00"), f"start {_got.start!r}")
 
     section("geo.GeoFilter - single-arg, satisfies EventFilter")
-    geo = GeoFilter([Anchor("San Jose", 37.336157, -121.890608, 50)],
+    geo = GeoFilter(("san jose", "san francisco"),
                     accept_virtual=True,
                     regional_sources=frozenset({"campus-feed"}))
     cases = [
@@ -2881,7 +2881,7 @@ def offline() -> None:
     nowhere = [("Remote Only", "in-region"), ("Anywhere", "in-region"),
                ("Worldwide", "in-region"), ("Online Event", "in-region")]
     for accept in (True, False):
-        gf = GeoFilter([Anchor("San Jose", 37.336157, -121.890608, 50)],
+        gf = GeoFilter(("san jose", "san francisco"),
                        accept_virtual=accept,
                        regional_sources=frozenset({"in-region"}))
         for loc, src in nowhere:
@@ -2901,26 +2901,45 @@ def offline() -> None:
                              attendance_mode=AttendanceMode.OFFLINE)),
               "the fallback this filter exists for stopped working")
 
-    # distance_mi has no caller yet (see GeoFilter.distance_mi); tested anyway
-    # so it isn't the only unverified arithmetic in the project, and so
-    # channels.yaml's radius is a number something has actually agreed with.
-    # Expected values are straight-line distances known independently of this
-    # implementation, not whatever it happened to return.
-    distances = [
-        ("the anchor itself is zero miles away", 37.336157, -121.890608, 0, 0),
-        ("San Francisco sits inside the 50mi radius", 37.7749, -122.4194, 30, 35),
-        ("Oakland sits inside it too", 37.8044, -122.2712, 28, 33),
-        ("Sacramento falls outside", 38.5816, -121.4944, 85, 92),
-        ("New York is not a rounding error away", 40.7128, -74.0060, 2500, 2600),
-    ]
-    # Built from channels.yaml rather than a hand-copied fixture: the radius
-    # only means anything against the geography actually deployed, and a copy
-    # would keep passing after someone moved the anchors. Reads a local file,
-    # so it stays inside the offline section.
+    # Built from channels.yaml rather than a hand-copied fixture, because the
+    # place list only means anything as deployed. Reads a local file, so it
+    # stays inside the offline section.
     bay = build_geo(load_channels())
-    for why, lat, lon, low, high in distances:
-        miles = bay.distance_mi(lat, lon)
-        check(why, low <= miles <= high, f"got {miles:.1f}mi, expected {low}-{high}")
+    deployed = [
+        ("a city inside the 50mi area that the old list lacked is kept",
+         "Stanford, CA", True),
+        ("so is an East Bay one", "Pleasanton, CA", True),
+        ("a qualified entry matches ', CA'", "Dublin, CA", True),
+        ("and the spelled-out state", "Dublin, California", True),
+        ("and a full street address", "6600 Dublin Blvd, Dublin, CA 94568", True),
+        ("a same-named city abroad is dropped", "Dublin, Ireland", False),
+        ("whole-word matching keeps ', ca' from matching ', Canada'",
+         "Richmond, Canada", False),
+        ("and keeps 'pittsburg' from matching Pittsburgh", "Pittsburgh, PA", False),
+        ("a city past 50 miles is dropped", "Napa, CA", False),
+        ("a core city still matches without its state", "SJSU Student Union, San Jose",
+         True),
+    ]
+    for why, loc, want in deployed:
+        got = bay.keep(_event(source="other", location=loc,
+                              attendance_mode=AttendanceMode.OFFLINE))
+        check(why, got is want, f"{loc!r} kept={got}")
+    # Each of these compiled before the constructor checked its entries, and
+    # the blank one kept "Tokyo, Japan".
+    bad_places = [
+        ("an empty place list", ()),
+        ("a blank entry", ("san jose", "")),
+        ("a YAML empty item, which arrives as None", ("san jose", None)),
+        ("one bare string instead of a list", "san jose"),
+    ]
+    for why, places in bad_places:
+        refused = False
+        try:
+            GeoFilter(places, accept_virtual=True)
+        except (ValueError, TypeError):
+            refused = True
+        check(f"{why} is refused rather than built", refused,
+              "it built, so the filter would keep or drop the wrong events silently")
 
     section("extract - typed markup beats asking a model to read prose")
     # See PageFactExtractor's class docstring for the measured split behind
@@ -3247,6 +3266,15 @@ def offline() -> None:
         check("tracking stripped from the event url", ev.url == "https://t/e")
         check("schema.org URI mapped to AttendanceMode.OFFLINE",
               ev.attendance_mode is AttendanceMode.OFFLINE)
+    entity_stub = StubHttpClient({"http://t/": '''<script type="application/ld+json">
+    {"@type":"Event","name":"Move &#038; Release","url":"https://t/m",
+     "location":{"name":"Rooms 1010 &#038; 1011"}}
+    </script>'''})
+    entity_ev = JsonLdSource("stub", "http://t/", entity_stub).fetch()[0]
+    check("an entity left in a JSON-LD name is decoded",
+          entity_ev.title == "Move & Release", f"title {entity_ev.title!r}")
+    check("and in a location", entity_ev.location == "Rooms 1010 & 1011",
+          f"location {entity_ev.location!r}")
 
     section("sources.gmail_label - a dead mailbox must not look like a quiet one")
     # imap.uid can fail two ways (see GmailLabelSource._events_in_message's

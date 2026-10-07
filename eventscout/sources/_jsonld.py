@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from html import unescape
 from typing import Iterator
 
 _LD_BLOCK = re.compile(
@@ -49,10 +50,17 @@ def event_nodes(html: str) -> Iterator[dict]:
 
 def flatten_text(value) -> str:
     if isinstance(value, str):
-        return value.strip()
+        # Entities only, never tags. JSON-LD is meant to carry decoded text, but
+        # studentlife.bayarea.northeastern.edu emitted "Move &#038; Release" in
+        # an Event name when probed on 2026-10-06.
+        return unescape(value).strip()
     if isinstance(value, dict):
         return flatten_text(value.get("name") or value.get("address") or "")
     if isinstance(value, list):
         return ", ".join(p for p in (flatten_text(v) for v in value) if p)
+    # A numeric name such as 2026 would otherwise flatten to "" and drop its
+    # event in JsonLdSource, which skips any node without a title.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
     return ""
 

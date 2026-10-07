@@ -1,23 +1,10 @@
-"""Geographic scoping for the South Bay anchors in channels.yaml."""
+"""Bay Area location filter, matching the place names listed in channels.yaml."""
 from __future__ import annotations
 
-import math
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
 
 from .models import Event
-
-# Substring match on free-text location: schema.org gives a display string,
-# not coordinates, so the radius test below has nothing to work with without a
-# geocoder. Spellings vary within one feed, e.g. Luma emits both "San
-# Francisco, CA" and "San Francisco, California".
-_BAY_CITIES = (
-    "san francisco", "san jose", "mountain view", "santa clara", "palo alto",
-    "sunnyvale", "oakland", "berkeley", "menlo park", "cupertino", "fremont",
-    "redwood city", "san mateo", "milpitas", "campbell", "los altos",
-    "foster city", "burlingame", "emeryville", "alameda", "hayward",
-    "bay area", "silicon valley",
-)
 
 # Rejects a location naming no fixed venue at all, e.g. "Remote only"; a city
 # listed alongside others still passes, e.g. "San Francisco, New York, or
@@ -34,21 +21,16 @@ _NEGATIVE = ("remote only", "anywhere", "worldwide")
 _VIRTUAL_HINTS = ("virtual", "online", "zoom", "teams meeting", "webinar")
 
 
-@dataclass(frozen=True)
-class Anchor:
-    label: str
-    lat: float
-    lon: float
-    radius_mi: float
-
-
-def _haversine_mi(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    r = 3958.8
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    return 2 * r * math.asin(math.sqrt(a))
+def _normalise(location: str) -> str:
+    """Lower-cased, with ", California" folded to ", ca" so one entry such as
+    "dublin, ca" matches both spellings Luma emits within one feed ("San
+    Francisco, CA" and "San Francisco, California").
+    """
+    text = re.sub(r"\s+", " ", (location or "").lower())
+    text = re.sub(r"\s*,\s*", ", ", text)
+    # Stripped so a quoted entry such as "san jose " still compiles to a
+    # pattern that can match.
+    return re.sub(r", california\b", ", ca", text).strip()
 
 
 class GeoFilter:
@@ -58,17 +40,28 @@ class GeoFilter:
     and is resolved once at construction rather than passed per call, so
     `keep` can stay single-arg and match the `EventFilter` protocol without
     callers having to isinstance-check for a wider signature.
+
+    `places` are matched as whole words, so "dublin, ca" does not match
+    "Dublin, Canada" and "pittsburg" does not match "Pittsburgh".
     """
 
     def __init__(
         self,
-        anchors: list[Anchor],
+        places: Sequence[str],
         accept_virtual: bool = True,
         regional_sources: frozenset[str] = frozenset(),
     ):
-        if not anchors:
-            raise ValueError("GeoFilter needs at least one anchor")
-        self._anchors = anchors
+        # Validated here rather than in build_geo, because a blank entry
+        # compiles to a pattern that matches every location and a bare string
+        # iterates into one-letter patterns. Neither raises on its own.
+        if isinstance(places, str):
+            raise TypeError("GeoFilter places must be a sequence of names, not one string")
+        names = [_normalise(p) if isinstance(p, str) else "" for p in places]
+        if not names or not all(n.strip(" ,") for n in names):
+            raise ValueError("GeoFilter needs at least one place name and no blank or "
+                             "non-string entry (channels.yaml geo.places)")
+        self._place_patterns = tuple(
+            re.compile(rf"(?<![a-z]){re.escape(n)}(?![a-z])") for n in names)
         self._accept_virtual = accept_virtual
         self._regional_sources = regional_sources
 
@@ -78,9 +71,9 @@ class GeoFilter:
         # so accept_virtual must not get to decide it.
         if self._matches_name(event.location):
             return True
-        # Everything below here named no Bay Area city. An event that is online,
-        # or whose location names nowhere on earth ("Remote only", "Worldwide"),
-        # is accept_virtual's decision and nothing else's. Falling through
+        # Everything below here named no Bay Area city. An event whose location
+        # text says it is online, or names nowhere on earth ("Remote only",
+        # "Worldwide"), is accept_virtual's decision and nothing else's. Falling through
         # instead reached the two fallbacks, which answer different questions:
         # page_unreadable means nothing could be READ, and the in-region
         # fallback means no city was NAMED, while these locations named
@@ -117,17 +110,6 @@ class GeoFilter:
         # 15 of its events were dropped as out of region.
         return event.page_unreadable or event.source in self._regional_sources
 
-    def distance_mi(self, lat: float, lon: float) -> float:
-        """Miles to the nearest anchor; not used by `keep` yet.
-
-        Every source reports a city string and never a coordinate, so there is
-        nothing to measure against and `keep` matches on names instead. Retained
-        so the configured radius has somewhere to plug in: wire a geocoder in as
-        a constructor dependency, and call it only for events that arrive
-        without a coordinate.
-        """
-        return min(_haversine_mi(lat, lon, a.lat, a.lon) for a in self._anchors)
-
     @staticmethod
     def _text_says_virtual(location: str) -> bool:
         text = (location or "").lower()
@@ -142,15 +124,14 @@ class GeoFilter:
         the weaker "does this prove Bay Area presence", so a term added for
         either cannot be missed by the other.
         """
-        text = re.sub(r"\s+", " ", (location or "").lower())
+        text = _normalise(location)
         return any(n in text for n in _NEGATIVE)
 
-    @staticmethod
-    def _matches_name(location: str) -> bool:
-        text = re.sub(r"\s+", " ", (location or "").lower())
+    def _matches_name(self, location: str) -> bool:
+        text = _normalise(location)
         if not text or any(n in text for n in _NEGATIVE):
             return False
-        return any(city in text for city in _BAY_CITIES)
+        return any(p.search(text) for p in self._place_patterns)
 
     @staticmethod
     def _names_a_place(location: str) -> bool:

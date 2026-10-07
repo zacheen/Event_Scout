@@ -271,7 +271,7 @@ class PageFactExtractor:
         the event to begin with. Keyed on source_kind rather than on matching
         known subject lines: a per-publication string test rots the moment a new
         newsletter is added."""
-        title = str(raw or "").strip()
+        title = flatten_text(raw)
         return title[:200] if title and source_kind in _PROSE_KINDS else ""
 
     @staticmethod

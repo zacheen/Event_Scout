@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from .geo import Anchor, GeoFilter
+from .geo import GeoFilter
 from .protocols import EventSource
 from .http import HttpClient, UrllibHttpClient
 from .sources.gmail_label import GmailLabelSource
@@ -306,8 +306,9 @@ def build_runtime(settings: Settings, channels: dict):
 
 def build_geo(channels: dict) -> GeoFilter:
     geo = channels.get("geo") or {}
-    anchors = [Anchor(a["label"], float(a["lat"]), float(a["lon"]), float(a["radius_mi"]))
-               for a in geo.get("anchors") or []]
+    # Passed through uncoerced, so GeoFilter still sees a bare string or a None
+    # entry as YAML gave it and can refuse it (see its constructor).
+    places = geo.get("places") or ()
     regional = {e["name"] for block in ("jsonld", "wordpress")
                 for e in channels.get(block) or [] if e.get("in_region")}
-    return GeoFilter(anchors, bool(geo.get("accept_virtual", True)), frozenset(regional))
+    return GeoFilter(places, bool(geo.get("accept_virtual", True)), frozenset(regional))

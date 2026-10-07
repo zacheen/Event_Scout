@@ -59,25 +59,118 @@
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Geo filter. South Bay centred, NOT San Francisco centred. The anchors state
-# the intended scope, a 50mi radius from these three that still reaches SF,
-# Oakland and Berkeley. GeoFilter.keep does not read them yet and matches the
-# Bay Area city and region names in geo.py instead, see the note below.
+# Geography. South Bay centred, NOT San Francisco centred.
 # ---------------------------------------------------------------------------
 geo:
-  anchors:
+  # Where to search, for a source whose query takes a centre and a distance.
+  # Nothing reads this yet, because every verified URL below fixes its own
+  # area. Meetup's `location=` parameter, held under platforms, is the likely
+  # first consumer.
+  search_area:
     - {label: "San Jose, CA",      lat: 37.336157, lon: -121.890608, radius_mi: 50}
     - {label: "Mountain View, CA", lat: 37.393816, lon: -122.078961, radius_mi: 50}
     - {label: "Santa Clara, CA",   lat: 37.352310, lon: -121.961900, radius_mi: 50}
+  # What GeoFilter.keep matches. Every source exposes a city string and never
+  # a coordinate (Cerebral Valley's location.name reads "San Francisco, CA"),
+  # so the filter tests names, not distance. The list is the cities within 50
+  # miles of a search_area point, measured from approximate city centres, so
+  # a city near the edge may sit on the wrong side.
+  #
+  # Matched case-insensitively as whole words, after ", California" is folded
+  # to ", ca". A name another state or country also uses carries ", ca", so
+  # "dublin, ca" drops Dublin, Ireland. The core cities stay bare even where
+  # they collide, because sources often omit the state ("SJSU Student Union,
+  # San Jose") and a missed event costs more than a stray one. A city missing
+  # from this list is dropped as out of region whenever its location reads
+  # "City, ST".
+  places:
+    # South Bay
+    - san jose
+    - santa clara
+    - sunnyvale
+    - mountain view
+    - moffett field
+    - cupertino
+    - campbell
+    - milpitas
+    - los gatos
+    - saratoga, ca
+    - morgan hill
+    - gilroy
+    # Peninsula
+    - palo alto
+    - stanford
+    - los altos
+    - menlo park
+    - atherton
+    - portola valley
+    - woodside, ca
+    - redwood city
+    - redwood shores
+    - san carlos, ca
+    - belmont, ca
+    - foster city
+    - san mateo
+    - hillsborough, ca
+    - burlingame
+    - millbrae
+    - san bruno
+    - brisbane, ca
+    - daly city
+    - pacifica
+    - half moon bay
+    - san francisco
+    # East Bay
+    - fremont
+    - newark, ca
+    - union city, ca
+    - hayward
+    - castro valley
+    - san leandro
+    - alameda
+    - oakland
+    - piedmont, ca
+    - emeryville
+    - berkeley
+    - albany, ca
+    - el cerrito
+    - richmond, ca
+    - pleasanton
+    - dublin, ca
+    - livermore
+    - san ramon, ca
+    - danville, ca
+    - moraga
+    - orinda
+    - lafayette, ca
+    - walnut creek
+    - pleasant hill, ca
+    - concord, ca
+    - martinez, ca
+    - benicia
+    - pittsburg, ca
+    - antioch, ca
+    - brentwood, ca
+    - tracy, ca
+    # Santa Cruz and south
+    - scotts valley
+    - santa cruz, ca
+    - capitola
+    - watsonville
+    - hollister, ca
+    # North Bay
+    - sausalito
+    - tiburon
+    - mill valley
+    - larkspur
+    - san rafael, ca
+    - vallejo
+    # Regions
+    - bay area
+    - silicon valley
   # An online event that names no Bay Area city passes only when this is true.
   # For JSON-LD sources this is `eventAttendanceMode` == OnlineEventAttendanceMode.
   accept_virtual: true
-  # Every source here exposes only a city string (Cerebral Valley's
-  # location.name reads "San Francisco, CA"), so GeoFilter.keep matches on city
-  # NAMES and the lat/lon/radius above are not consulted at all today. They are
-  # kept because they state the intended scope and because GeoFilter.distance_mi
-  # already computes against them; wiring a geocoder in is what would make the
-  # radius live. See geo.py.
 
 # ---------------------------------------------------------------------------
 # TIER A1 - Gmail label. Highest recall, zero ToS risk.

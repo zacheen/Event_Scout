@@ -117,10 +117,10 @@ keywords:
 # be judged on data rather than recollection.
 
 # --- Geography -------------------------------------------------------------
-# Anchors and radius live in channels.yaml under `geo`.
+# The place names the geo filter matches live in channels.yaml under `geo`.
 #
-# The zone absolute times are DISPLAYED in, which has to agree with those
-# anchors or the digest states a time in a region the reader is not in. It is
+# The zone absolute times are DISPLAYED in, which has to agree with that
+# geography or the digest states a time in a region the reader is not in. It is
 # NOT the zone anything is stored in: Event.start keeps whatever offset its
 # source used, and notifier.format_digest converts on the way out. Before
 # that conversion existed, every neu-alumni-events row was observed printing
