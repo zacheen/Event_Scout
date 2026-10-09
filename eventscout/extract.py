@@ -44,8 +44,10 @@ _SYSTEM = (
     '"rsvp_deadline": "<ISO 8601 with UTC offset, or empty>", '
     '"organizer": "<hosting company or school, or empty>"}\n\n'
     "Rules. Return an empty string for anything the page does not state; never "
-    "infer or estimate a date. If a time is given without a zone, assume "
-    "America/Los_Angeles and write the offset explicitly. Today is "
+    "infer or estimate a date. The one exception is a missing year: when the "
+    "page states a month and day but no year, use the year that puts that date "
+    "closest to the reference date below. If a time is given without a zone, "
+    "assume America/Los_Angeles and write the offset explicitly. Today is "
 )
 _MAX_CHARS = 6000
 # What a start time could have been READ FROM. A month name has to sit next to
@@ -163,9 +165,17 @@ class PageFactExtractor:
         if not text:
             return event
         today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+        # A page stating "Sep 15" and "5:00 - 6:15 PM EST" with no year came back
+        # with an empty start, because without the missing-year exception in
+        # _SYSTEM the prompt forbids inferring any part of a date. An
+        # undated event skips the date window, so a finished event reached the
+        # digest as new. The issue's publish date is the year anchor since it is
+        # when the link was current, while today would mis-year an event
+        # announced months ahead.
+        reference = event.published_at[:10] or today
         try:
             raw = self._invoker.json_call(
-                _SYSTEM + today,
+                f"{_SYSTEM}{today}. The reference date is {reference}.",
                 f"url: {event.url}\ntitle: {event.title}\n\n{text}",
                 _EXTRACT_SCHEMA, "event_facts")
         except Exception as exc:

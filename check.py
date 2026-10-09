@@ -3231,6 +3231,34 @@ def offline() -> None:
     check("non-date facts from a readable page are still kept",
           dated.organizer == "Tesla", f"organizer={dated.organizer!r}")
 
+    # A year-less page is resolved against the issue's publish date, so a past
+    # event gets a past start and the date window can drop it.
+    class _YearlessPage:
+        def get_text(self, url):
+            return ("<html><body><p>The Sales Advantage at IBM Sep 15</p>"
+                    "<p>5:00 - 6:15 PM EST. Virtual.</p></body></html>")
+
+    class _PromptRecorder:
+        system = ""
+
+        def json_call(self, system, user, schema, name):
+            _PromptRecorder.system = system
+            return ('{"title": "", "start": "2026-09-15T14:00:00-07:00", "end": "", '
+                    '"location": "Virtual", "rsvp_deadline": "", "organizer": "IBM"}')
+
+    listed = replace(thin, published_at="2026-09-16T12:00:00+00:00")
+    yearless = PageFactExtractor(_PromptRecorder(), _YearlessPage()).extract(listed)
+    check("a year-less page is resolved against the issue's publish date",
+          "reference date is 2026-09-16" in _PromptRecorder.system,
+          _PromptRecorder.system[-80:])
+    check("and the start read from it is kept",
+          yearless.start == "2026-09-15T14:00:00-07:00", f"got {yearless.start!r}")
+    PageFactExtractor(_PromptRecorder(), _YearlessPage()).extract(thin)
+    today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+    check("an event with no publish date falls back to today as the reference",
+          f"reference date is {today}" in _PromptRecorder.system,
+          _PromptRecorder.system[-80:])
+
     check("an event whose page could not be read is kept, not dropped as "
           "out of region", geo.keep(_event(url="https://tesla.com/event/x",
                                            source="direct-consideration",
@@ -3283,6 +3311,14 @@ def offline() -> None:
          "a click tracker: per-send URL, so dedupe can never collapse it"),
         ("https://directconsideration.beehiiv.com/unsubscribe/abc", False,
          "an unsubscribe footer"),
+        ("https://events.riviancareers.com/plugin-earlycareer2027", True,
+         "a Rivian event, whose 'events' sits in the host, not the path"),
+        ("https://careers.ibm.com/eventlisting/EventDetail?jobId=131054", True,
+         "an IBM event under /eventlisting/"),
+        # Looks like an event short link but is a candidate interest form, so
+        # it must stay rejected.
+        ("https://app3.greenhouse.io/e/arnmvw", False,
+         "a Greenhouse /e/ form that is not an event"),
     ]
     for url, want, why in link_cases:
         check(f"{'accepts' if want else 'rejects'} {why}",

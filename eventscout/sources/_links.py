@@ -49,6 +49,10 @@ _EVENT_HINTS = (
     # Handshake's own event paths only. A bare "joinhandshake.com/" also matched
     # its CDN, which is how footer icons became candidate events.
     "joinhandshake.com/events", "joinhandshake.com/career_fairs",
+    # Employer event pages that miss the hints above. Rivian's "events" is in
+    # the host, so "/events/" misses it. IBM's /eventlisting/ has "listing"
+    # after "event", so "/event/" misses it.
+    "events.riviancareers.com/", "/eventlisting/",
 )
 
 # Static assets. An email footer's icon set matched _EVENT_HINTS purely because
