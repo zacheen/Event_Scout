@@ -2468,6 +2468,24 @@ def offline() -> None:
               bool(want_names) or "[skip]" in _out.getvalue(),
               f"said {_out.getvalue()!r}")
 
+    # Both bounds must reach the source. A dropped keyword silently falls back
+    # to the constructor default.
+    _bounded = build_sources(
+        {"gmail": [{"name": "mail-labels", "status": "verified",
+                    "newer_than_days": 7, "max_messages": 3}]},
+        StubHttpClient({}), gmail_read_user="u@x", gmail_read_password="pw",
+        gmail_read_labels=["a"])[0]
+    check("channels.yaml newer_than_days reaches the mailbox source",
+          _bounded._newer_than == 7, f"got {_bounded._newer_than}")
+    check("channels.yaml max_messages reaches the mailbox source",
+          _bounded._max_messages == 3, f"got {_bounded._max_messages}")
+    _live_gmail = (load_channels().get("gmail") or [{}])[0]
+    check("the live mailbox window sits below its cap at the measured volume",
+          int(_live_gmail.get("newer_than_days", 60)) * 10
+          < int(_live_gmail.get("max_messages", 500)),
+          f"window {_live_gmail.get('newer_than_days')}d at ~10/day vs "
+          f"cap {_live_gmail.get('max_messages')}")
+
     # The environment reaches build_sources only through Settings, so a mailbox
     # variable that load_settings forgets is invisible however build_runtime is
     # called. Asserted over the source because a live run is what would notice.

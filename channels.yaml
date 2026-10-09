@@ -9,7 +9,7 @@
 # the next paragraph is a human note that nothing reads and nothing warns about.
 #   jsonld:       name; url; status
 #   wordpress:    name; url; status
-#   gmail:        status; newer_than_days  (mailbox and labels come from .env)
+#   gmail:        status; newer_than_days; max_messages  (mailbox and labels come from .env)
 #   newsletters:  name; host; status; archive_path (default /archive)
 #
 # Read by build_geo rather than build_sources: `in_region` on a jsonld or
@@ -205,6 +205,14 @@ gmail:
     # disables mailbox reading however the environment is set.
     status: verified
     # No sender allowlist on purpose. The label IS the filter.
+    #
+    # The window, not the cap, should decide what is read. One label held 602
+    # messages in a 60-day window, so the newest-first cap of 500 cut the oldest
+    # 102 every run. At ~10/day, 45 days is ~450. Every run re-reads a message
+    # until it ages out, so a shorter window loses nothing already read.
+    newer_than_days: 45
+    # Runaway guard, fires only if volume nearly doubles. ~35 s per extra 100 FETCHes.
+    max_messages: 800
 
 # ---------------------------------------------------------------------------
 # TIER A1b - schema.org JSON-LD, the highest leverage adapter in the system.

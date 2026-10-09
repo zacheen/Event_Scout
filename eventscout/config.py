@@ -229,6 +229,7 @@ def _build_gmail_sources(entry: dict, user: str, password: str,
     return [GmailLabelSource(
         f"gmail:{label}", user, password, label,
         newer_than_days=int(entry.get("newer_than_days", 60)),
+        max_messages=int(entry.get("max_messages", 500)),
         body_chars=body_chars, skip_from=skip_from) for label in labels]
 
 
