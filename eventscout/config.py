@@ -327,4 +327,6 @@ def build_geo(channels: dict) -> GeoFilter:
     places = geo.get("places") or ()
     regional = {e["name"] for block in ("jsonld", "wordpress")
                 for e in channels.get(block) or [] if e.get("in_region")}
-    return GeoFilter(places, bool(geo.get("accept_virtual", True)), frozenset(regional))
+    search_area = [(a["lat"], a["lon"], a["radius_mi"]) for a in geo.get("search_area") or ()]
+    return GeoFilter(places, bool(geo.get("accept_virtual", True)), frozenset(regional),
+                     search_area)

@@ -30,7 +30,7 @@ from .protocols import JsonInvoker
 from .models import Event, iso_or_empty
 from ._llm_json import lenient_json
 from .sources._text import strip_html
-from .sources._jsonld import event_nodes, flatten_text
+from .sources._jsonld import event_nodes, flatten_text, place_coordinates
 from .urls import canon_url
 
 log = logging.getLogger("eventscout.extract")
@@ -273,6 +273,11 @@ class PageFactExtractor:
             value = flatten_text(node.get(field))
             if value:
                 facts[field] = value[:200]
+        # Read from the page this fetch already holds, so a mailbox link to a
+        # Luma event gains its position without another request.
+        coordinates = place_coordinates(node.get("location"))
+        if coordinates:
+            facts["coordinates"] = coordinates
         title = PageFactExtractor._prose_title(node.get("name"), event.source_kind)
         if title:
             facts["title"] = title

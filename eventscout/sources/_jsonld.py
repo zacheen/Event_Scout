@@ -11,6 +11,8 @@ import re
 from html import unescape
 from typing import Iterator
 
+from ..models import coordinates_or_none
+
 _LD_BLOCK = re.compile(
     r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.S | re.I
 )
@@ -63,4 +65,24 @@ def flatten_text(value) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     return ""
+
+
+def place_coordinates(location) -> tuple[float, float] | None:
+    """The first coordinates an Event's location carries, or None.
+
+    Read from a schema.org geo node or from latitude and longitude on the Place
+    itself, since Luma emits both. flatten_text keeps only the place's name, so
+    this is the one reader of them. On 2026-10-09 every Luma calendar node and
+    every Eventbrite node carried them, including those whose name was only a
+    venue such as "135 Constitution Dr".
+    """
+    for place in location if isinstance(location, list) else [location]:
+        if not isinstance(place, dict):
+            continue
+        geo = place.get("geo")
+        for holder in (geo if isinstance(geo, dict) else {}, place):
+            found = coordinates_or_none(holder.get("latitude"), holder.get("longitude"))
+            if found:
+                return found
+    return None
 

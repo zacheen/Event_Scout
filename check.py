@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eventscout.config import (_parse_labels, build_geo, build_runtime, build_sources,
                                load_channels,
                                load_settings)
-from eventscout.geo import GeoFilter
+from eventscout.geo import GeoFilter, _miles
 from eventscout.http import (HostRateLimiter, HttpClient, StubHttpClient,
                              UrllibHttpClient, _decode_body)
 from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
@@ -61,7 +61,7 @@ from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
                                  run)
 from eventscout.store import SqliteEventStore
 from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
-                               Urgency,
+                               Urgency, coordinates_or_none,
                                display_zone, is_date_only, iso_or_empty,
                                parse_iso)
 from eventscout.extract import PageFactExtractor
@@ -2427,6 +2427,27 @@ def offline() -> None:
     check("merged_with still fills the ordinary fields it is for",
           _event().merged_with(unread).location == "San Jose, CA")
 
+    section("models.Event.coordinates - a pair from coordinates_or_none, or None")
+    check("coordinates_or_none reads numbers and numeric strings",
+          coordinates_or_none("37.5", -122) == (37.5, -122.0),
+          str(coordinates_or_none("37.5", -122)))
+    check("and refuses a missing, unreadable or impossible value",
+          all(coordinates_or_none(*p) is None
+              for p in ((None, 1), ("x", 1), ("nan", 1), (91, 0), (0, 181))))
+    check("and refuses (0, 0), the usual no-data default",
+          coordinates_or_none(0, 0) is None, str(coordinates_or_none(0, 0)))
+    check("an Event built without coordinates keeps None, not the empty string",
+          _event().coordinates is None, repr(_event().coordinates))
+    for _bad_coords in (("37.5", "-122"), (95.0, 0.0), (37.5,), (0.0, 0.0)):
+        try:
+            _event(coordinates=_bad_coords)
+            check(f"Event refuses coordinates {_bad_coords!r}", False)
+        except ValueError:
+            check(f"Event refuses coordinates {_bad_coords!r}", True)
+    _filled = _event(location="Mox").merged_with(_event(location="Mox", coordinates=(37.0, -122.0)))
+    check("merged_with fills coordinates from the losing copy",
+          _filled.coordinates == (37.0, -122.0), repr(_filled.coordinates))
+
     section("models.Score - three axes, two of them rank")
     check("rank excludes cost, so a South Bay commute cannot demote all of SF",
           Score(fit=5, access_value=4, cost=99).rank == 20)
@@ -3122,7 +3143,8 @@ def offline() -> None:
     _ld_first = _ld_page([
         _ld_entry("aaa11111", "2026-10-10T18:00:00.000Z", end="2026-10-10T20:00:00.000Z",
                   geo_address_info={"full_address": "1 Main St, Palo Alto, CA 94301, USA",
-                                    "city_state": "Palo Alto, CA"}),
+                                    "city_state": "Palo Alto, CA"},
+                  coordinate={"latitude": 37.44, "longitude": -122.16}),
         _ld_entry("bbb22222", "2026-10-11T18:00:00.000Z", geo_address_info={
             "mode": "obfuscated", "city_state": "San Francisco, CA"})], True, "c1")
     _ld_pages = {
@@ -3149,6 +3171,9 @@ def offline() -> None:
               f"{_a.start} {_a.end}")
         check("a public address is used whole", _a.location == "1 Main St, Palo Alto, CA 94301, USA",
               _a.location)
+        check("the API's coordinate becomes the event's coordinates",
+              _a.coordinates == (37.44, -122.16) and _b.coordinates is None,
+              f"{_a.coordinates} {_b.coordinates}")
         check("a guests-only address falls back to its city", _b.location == "San Francisco, CA",
               _b.location)
         check("an online event is located Online, so it is not sent to the extractor",
@@ -3264,6 +3289,56 @@ def offline() -> None:
     ]
     for rule, ev, want in cases:
         check(rule, geo.keep(ev) is want)
+
+    # The distance test in keep(). One 50 mile centre at San Jose, with Menlo
+    # Park's 135 Constitution Dr inside it and Boston far outside.
+    _geo_d = GeoFilter(("san jose",), accept_virtual=True,
+                       regional_sources=frozenset({"campus-feed"}),
+                       search_area=((37.336157, -121.890608, 50.0),))
+    _menlo, _boston = (37.4836, -122.1481), (42.3601, -71.0589)
+    dist_cases = [
+        ("a venue-only location inside the radius is kept",
+         _event(source="other", location="135 Constitution Dr", coordinates=_menlo), True),
+        ("a venue-only location outside the radius is dropped",
+         _event(source="other", location="Hilton", coordinates=_boston), False),
+        ("a town the place list leaves out is kept when it is near",
+         _event(source="other", location="Aptos, CA", coordinates=(36.9772, -121.8994)), True),
+        ("far coordinates beat the regional-feed fallback",
+         _event(source="campus-feed", location="Welcome Center", coordinates=_boston), False),
+        ("far coordinates beat an online mode, as a named city does",
+         _event(source="other", location="Hilton", coordinates=_boston,
+                attendance_mode=AttendanceMode.ONLINE), False),
+        ("a listed name still wins over far coordinates",
+         _event(source="other", location="San Jose, CA", coordinates=_boston), True),
+        ("location text 'Virtual' still goes to accept_virtual despite coordinates",
+         _event(source="other", location="Virtual", coordinates=_boston), True),
+    ]
+    for rule, ev, want in dist_cases:
+        check(rule, _geo_d.keep(ev) is want)
+    # Pinned to a known distance, since a wrong Earth radius would still put
+    # Boston outside and Menlo Park inside.
+    _sf_sj = _miles((37.7749, -122.4194), (37.336157, -121.890608))
+    check("San Francisco to San Jose measures about 42 miles", abs(_sf_sj - 41.9) < 0.5,
+          f"{_sf_sj:.2f}")
+    # A regional-feed venue the fallback keeps, so a filter that let an empty
+    # search_area decide anyway would drop it.
+    check("without a search_area, coordinates change nothing",
+          geo.keep(_event(source="campus-feed", location="Welcome Center",
+                          coordinates=_boston)) is True)
+    _geo_strict = GeoFilter(("san jose",), accept_virtual=False,
+                            search_area=((37.336157, -121.890608, 50.0),))
+    check("near coordinates keep an online-mode event even with accept_virtual off",
+          _geo_strict.keep(_event(source="other", location="AWS Builder Loft", coordinates=_menlo,
+                                  attendance_mode=AttendanceMode.ONLINE)) is True)
+    for _bad_area in (((37.0, -122.0, 0),), ((37.0, -122.0),), ((-121.89, 37.33, 50.0),)):
+        try:
+            GeoFilter(("x",), search_area=_bad_area)
+            check(f"search_area {_bad_area!r} is refused", False)
+        except ValueError:
+            check(f"search_area {_bad_area!r} is refused", True)
+    check("build_geo passes channels.yaml search_area through",
+          build_geo(load_channels()).keep(_event(source="other", location="135 Constitution Dr",
+                                                 coordinates=_menlo)))
 
     # Recreates the case described in geo.py keep()'s comment.
     # Both accept_virtual values are exercised, since the bug was that
@@ -3383,6 +3458,15 @@ def offline() -> None:
                        url="https://luma.com/x", source_kind="newsletter",
                        description="Linked from https://d.beehiiv.com/p/x", **kw)
         return PageFactExtractor(_Refuser(), _Page(html)).extract(event)
+
+    _geo_page = ('<html><script type="application/ld+json">' + json.dumps({
+        "@type": "Event", "url": "https://luma.com/x", "name": "Real Name",
+        "startDate": "2026-09-20T18:00:00-07:00",
+        "location": {"name": "Mox", "geo": {"latitude": 37.77, "longitude": -122.42}}})
+        + "</script></html>")
+    check("the event page's geo is read in the same fetch",
+          _extract(_geo_page).coordinates == (37.77, -122.42),
+          repr(_extract(_geo_page).coordinates))
 
     typed = _extract(_ld("https://luma.com/x"))
     check("an exact startDate is read from the page, not guessed",
@@ -3706,6 +3790,7 @@ def offline() -> None:
          "a Greenhouse /e/ form that is not an event"),
         # Luma plumbing and the look-alikes that stay events, see
         # _LUMA_PLUMBING_SEGMENTS in _links.py.
+        ("https://luma.com/", False, "Luma's home page"),
         ("https://luma.com/android", False, "Luma's Android app link"),
         ("https://luma.com/ios", False, "Luma's iOS app link"),
         ("https://luma.com/settings", False, "Luma's account settings"),
@@ -3751,6 +3836,27 @@ def offline() -> None:
           entity_ev.title == "Move & Release", f"title {entity_ev.title!r}")
     check("and in a location", entity_ev.location == "Rooms 1010 & 1011",
           f"location {entity_ev.location!r}")
+    geo_stub =StubHttpClient({"http://t/": '''<script type="application/ld+json">
+    [{"@type":"Event","name":"Geo node","url":"https://t/g",
+      "location":{"name":"135 Constitution Dr","geo":{"latitude":37.4836,"longitude":-122.1481}}},
+     {"@type":"Event","name":"Flat","url":"https://t/f",
+      "location":{"name":"Mox","latitude":"37.77","longitude":"-122.42"}},
+     {"@type":"Event","name":"Bare","url":"https://t/b","location":"San Jose, CA"},
+     {"@type":"Event","name":"Hybrid","url":"https://t/h","location":[
+       {"@type":"VirtualLocation","url":"https://zoom.us/j/1"},
+       {"@type":"Place","name":"Mox","geo":{"latitude":37.77,"longitude":-122.42}}]}]
+    </script>'''})
+    _geo_by = {e.url: e for e in JsonLdSource("stub", "http://t/", geo_stub).fetch()}
+    check("a location's geo node becomes the event's coordinates",
+          _geo_by["https://t/g"].coordinates == (37.4836, -122.1481),
+          repr(_geo_by["https://t/g"].coordinates))
+    check("and so do latitude and longitude on the Place itself",
+          _geo_by["https://t/f"].coordinates == (37.77, -122.42),
+          repr(_geo_by["https://t/f"].coordinates))
+    check("a location with none leaves coordinates None", _geo_by["https://t/b"].coordinates is None)
+    check("a hybrid's Place is found after its VirtualLocation",
+          _geo_by["https://t/h"].coordinates == (37.77, -122.42),
+          repr(_geo_by["https://t/h"].coordinates))
     numeric_stub = StubHttpClient({"http://t/": '''<script type="application/ld+json">
     {"@type":"Event","name":2026,"url":"https://t/n"}
     </script>'''})

@@ -64,17 +64,19 @@
 # Geography. South Bay centred, NOT San Francisco centred.
 # ---------------------------------------------------------------------------
 geo:
-  # Where to search, for a source whose query takes a centre and a distance.
-  # Nothing reads this yet, because every verified URL below fixes its own
-  # area. Meetup's `location=` parameter, held under platforms, is the likely
-  # first consumer.
+  # The centres of GeoFilter's distance test. An event carrying coordinates is
+  # in region within radius_mi of any one of them. No source query reads them
+  # yet, because every verified URL below fixes its own area. Meetup's
+  # `location=` parameter, held under platforms, is the likely first one.
   search_area:
     - {label: "San Jose, CA",      lat: 37.336157, lon: -121.890608, radius_mi: 50}
     - {label: "Mountain View, CA", lat: 37.393816, lon: -122.078961, radius_mi: 50}
     - {label: "Santa Clara, CA",   lat: 37.352310, lon: -121.961900, radius_mi: 50}
-  # What GeoFilter.keep matches. Every source exposes a city string and never
-  # a coordinate (Cerebral Valley's location.name reads "San Francisco, CA"),
-  # so the filter tests names, not distance. The list is the cities and better
+  # What GeoFilter.keep matches by name, ahead of the distance test. Luma and
+  # Eventbrite also carry coordinates, and a mailbox or newsletter link gains
+  # them when its event page does. Cerebral Valley, WordPress and Eightfold give
+  # only text (Cerebral Valley's location.name reads "San Francisco, CA"), so
+  # for them the names below are the whole test. The list is the cities and better
   # known communities within 50 miles of a search_area point, not every small
   # town or unincorporated area, because those rarely host events. Distance is
   # measured from approximate centres, so a city near the edge may sit on the
@@ -288,11 +290,14 @@ jsonld:
     adapter: jsonld
     url: https://www.eventbrite.com/d/ca--san-francisco/tech-career-fair/
     status: verified
-    # Only 1 of 18 events survives the geo filter, so this looks like a poor
-    # source by volume. Kept anyway because that one was "San Francisco Job Fair
-    # October 8, 2026": a career fair is the highest access_value category there
-    # is, and this is the only source in the set that surfaces them at all.
-    # Judge this source on category, never on count.
+    # When this source was added, only 1 of its 18 events survived the
+    # name-only geo filter, so it looked like a poor source by volume. Kept
+    # anyway because that one was "San Francisco Job Fair October 8, 2026": a
+    # career fair is the highest access_value category there is, and this is
+    # the only source in the set that surfaces them at all. Judge this source on
+    # category, never on count. A later fetch on 2026-10-09 again had 18 events,
+    # all naming only a venue such as "Hilton" or "Marriott" and all carrying
+    # coordinates within 50 miles, so the distance test now keeps them.
 
   - name: cerebral-valley-events
     adapter: jsonld

@@ -1,10 +1,22 @@
-"""Bay Area location filter, matching the place names listed in channels.yaml."""
+"""Bay Area location filter, matching the place names listed in channels.yaml
+and, for an event that carries coordinates, the distance to its search area."""
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 
-from .models import Event
+from .models import Event, coordinates_or_none
+
+_EARTH_RADIUS_MI = 3958.8
+
+
+def _miles(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Great-circle distance between two (latitude, longitude) points."""
+    lat1, lon1, lat2, lon2 = map(math.radians, (*a, *b))
+    h = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 2 * _EARTH_RADIUS_MI * math.asin(math.sqrt(h))
 
 # Marks a location naming no fixed venue at all, which accept_virtual decides.
 # Only "remote only" also stops a named Bay Area city from counting, because it
@@ -47,6 +59,10 @@ class GeoFilter:
 
     `places` are matched as whole words, so "dublin, ca" does not match
     "Dublin, Canada" and "pittsburg" does not match "Pittsburgh".
+
+    `search_area` is (latitude, longitude, radius in miles) per centre, from
+    channels.yaml geo.search_area. An event with coordinates within any one
+    radius is in region. Empty leaves the name rules as the only test.
     """
 
     def __init__(
@@ -54,6 +70,7 @@ class GeoFilter:
         places: Sequence[str],
         accept_virtual: bool = True,
         regional_sources: frozenset[str] = frozenset(),
+        search_area: Sequence[tuple[float, float, float]] = (),
     ):
         # Validated here rather than in build_geo, because a blank entry
         # compiles to a pattern that matches every location and a bare string
@@ -68,6 +85,17 @@ class GeoFilter:
             re.compile(rf"(?<![a-z]){re.escape(n)}(?![a-z])") for n in names)
         self._accept_virtual = accept_virtual
         self._regional_sources = regional_sources
+        # Neither raises on its own. A zero or negative radius admits nothing,
+        # and a centre with latitude and longitude swapped puts every Bay Area
+        # venue thousands of miles out.
+        centres = []
+        for c in search_area:
+            point = coordinates_or_none(c[0], c[1]) if len(c) == 3 else None
+            if point is None or not c[2] > 0:
+                raise ValueError("GeoFilter search_area needs (latitude, longitude, radius > 0) "
+                                 f"per centre (channels.yaml geo.search_area), got {c!r}")
+            centres.append((point, float(c[2])))
+        self._search_area = tuple(centres)
 
     def keep(self, event: Event) -> bool:
         # A named Bay Area city wins over everything, INCLUDING virtual, unless
@@ -90,6 +118,15 @@ class GeoFilter:
         # events this flag exists to keep.
         if self._text_says_virtual(event.location) or self._states_nowhere(event.location):
             return self._accept_virtual
+        # Coordinates settle what the name rules below cannot, a venue-only
+        # location or a town the list leaves out. On one fetch the name rules
+        # dropped 37 events from four sources that carried coordinates, and all
+        # 37 were within 50 miles. After the name match so that fast path is
+        # unchanged, and ahead of the online-mode test, as a named city is, so
+        # a position decides whatever accept_virtual says.
+        if event.coordinates is not None and self._search_area:
+            return any(_miles(event.coordinates, centre) <= radius
+                       for centre, radius in self._search_area)
         # A named non-Bay-Area city beats an online attendance MODE, as
         # _VIRTUAL_HINTS gives text precedence over the mode. cerebralvalley.ai
         # marks World AI Week online (VirtualLocation) while its own page names

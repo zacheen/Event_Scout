@@ -21,7 +21,7 @@ from typing import Callable, ClassVar
 from urllib.parse import urlencode
 
 from ..http import HttpClient
-from ..models import AttendanceMode, Coverage, Event, iso_or_empty, parse_iso
+from ..models import AttendanceMode, Coverage, Event, coordinates_or_none, iso_or_empty, parse_iso
 from ..urls import canon_url
 
 log = logging.getLogger(__name__)
@@ -127,6 +127,12 @@ class LumaDiscoverSource:
         # A blank location sends the event to PageFactExtractor, which would
         # fetch the event page to learn what location_type already says.
         location = self._location(item) or ("Online" if mode is AttendanceMode.ONLINE else "")
+        # A guests-only event's coordinate is moved to a point inside its city
+        # rather than withheld, as probed on 2026-10-09, close enough for a
+        # distance in miles.
+        point = item.get("coordinate")
+        coordinates = (coordinates_or_none(point.get("latitude"), point.get("longitude"))
+                       if isinstance(point, dict) else None)
         return Event(
             event_uid=f"{self.kind}:{url}",
             title=title,
@@ -137,6 +143,7 @@ class LumaDiscoverSource:
             end=self._instant(item, "end_at"),
             organizer=self._organizer(entry),
             location=location,
+            coordinates=coordinates,
             attendance_mode=mode,
             description="",
             published_at="",

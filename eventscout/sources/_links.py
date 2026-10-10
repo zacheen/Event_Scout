@@ -85,7 +85,10 @@ def _is_luma_plumbing(lowered: str) -> bool:
     if parts.hostname not in _LUMA_HOSTS:
         return False
     first = parts.path.strip("/").split("/", 1)[0]
-    return first in _LUMA_PLUMBING_SEGMENTS or parts.path.startswith(_LUMA_PLUMBING_PREFIXES)
+    # An empty first segment is Luma's home page, which mail has delivered as
+    # an event link.
+    return (not first or first in _LUMA_PLUMBING_SEGMENTS
+            or parts.path.startswith(_LUMA_PLUMBING_PREFIXES))
 
 
 def is_event_link(href: str) -> bool:

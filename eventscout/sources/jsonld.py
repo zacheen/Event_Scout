@@ -15,7 +15,7 @@ from typing import ClassVar
 from ..http import HttpClient
 from ..models import AttendanceMode, Event, iso_or_empty
 from ..urls import canon_url
-from ._jsonld import event_nodes, flatten_text
+from ._jsonld import event_nodes, flatten_text, place_coordinates
 
 
 
@@ -61,6 +61,7 @@ class JsonLdSource:
             end=iso_or_empty(node.get("endDate")),
             organizer=flatten_text(node.get("organizer")),
             location=flatten_text(node.get("location")),
+            coordinates=place_coordinates(node.get("location")),
             attendance_mode=self._attendance_mode(str(node.get("eventAttendanceMode") or "")),
             description=str(node.get("description") or "").strip(),
             # None of the four verified sites emit schema.org's datePublished

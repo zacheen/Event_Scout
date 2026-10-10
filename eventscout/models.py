@@ -145,6 +145,11 @@ class Event:
     # Set by the pipeline's _stamp_naive, the one place that sees the bare
     # date before it becomes an instant.
     all_day: bool = False
+    # (latitude, longitude) from coordinates_or_none, or None when the source
+    # gave none. Lets GeoFilter judge a venue-only location such as "Mox" by
+    # distance. Not persisted, for page_unreadable's reason, since only the geo
+    # filter reads it and it runs on this fetch alone.
+    coordinates: tuple[float, float] | None = None
 
     def __post_init__(self):
         # JSON nulls (e.g. "location": null) survive .get(key, "") since the key
@@ -157,6 +162,10 @@ class Event:
         # to "" instead of the enum, breaking isinstance/.name downstream.
         for f in fields(self):
             if getattr(self, f.name) is None:
+                # A None default means absence is itself the value, as for
+                # coordinates, and "" would read as coordinates that exist.
+                if f.default is None:
+                    continue
                 if f.name in _IDENTITY_FIELDS:
                     # Coercing these to "" would be worse than crashing. Two
                     # adapters that both forget to build a uid would produce
@@ -190,6 +199,13 @@ class Event:
             raise ValueError(
                 f"Event.url must be canonical: {self.url!r} should be "
                 f"{canon_url(self.url)!r}")
+        # Same contract as the timestamps, so a pair of strings or an
+        # impossible latitude fails here rather than inside a distance.
+        if self.coordinates is not None and not (
+                isinstance(self.coordinates, tuple) and len(self.coordinates) == 2
+                and coordinates_or_none(*self.coordinates) == self.coordinates):
+            raise ValueError(
+                f"Event.coordinates must come from coordinates_or_none: {self.coordinates!r}")
 
     @property
     def is_virtual(self) -> bool:
@@ -290,6 +306,24 @@ def parse_iso(value: str) -> datetime | None:
     except ValueError:
         return None
     return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def coordinates_or_none(latitude: object, longitude: object) -> tuple[float, float] | None:
+    """(latitude, longitude) as floats, or None when either is missing or off the globe.
+
+    Normalised rather than trusted, as iso_or_empty is, because sources hand
+    these over as numbers or as strings. A NaN fails both range tests too.
+    (0, 0) is refused as the usual "no data" default rather than a venue,
+    because GeoFilter's distance test outranks the in_region and unreadable
+    page fallbacks, so a placeholder there would drop a local event silently.
+    """
+    try:
+        lat, lon = float(latitude), float(longitude)
+    except (TypeError, ValueError):
+        return None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    return (lat, lon)
 
 
 def iso_or_empty(value: object) -> str:
