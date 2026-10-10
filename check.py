@@ -4252,21 +4252,22 @@ def offline() -> None:
 # --------------------------------------------------------------------------
 # LIVE
 # --------------------------------------------------------------------------
-# (name, url, minimum event count, expected to keep at least one after geo).
-# The floor is what catches a silently broken parser; keep it well under the
-# observed count so normal week-to-week variation does not cry wolf.
+# (name, url, expected to keep at least one after geo).
+# Every source must return at least one event, which is what catches a
+# silently broken parser. There is no per-source floor, because a count that
+# moves week to week cannot tell a quiet calendar from a broken one. luma-ai-sf
+# failed a floor of 5 with 4 events on 2026-10-09 while parsing every one.
 JSONLD_SOURCES = [
-    ("neu-silicon-valley-luma", "https://luma.com/NUSiliconValleyCampus", 5, True),
-    ("luma-genai-sf", "https://luma.com/genai-sf", 5, True),
-    ("neu-bayarea-student-life", "https://studentlife.bayarea.northeastern.edu/events/", 5, True),
-    ("cerebral-valley-events", "https://cerebralvalley.ai/events", 5, True),
-    ("luma-sf", "https://luma.com/sf", 5, True),
-    ("luma-ai-sf", "https://luma.com/ai-sf", 5, True),
-    # Eventbrite is judged on category, not volume: typically only one or two of
-    # its listings survive the geo filter, but they are career fairs, which no
-    # other source surfaces. So the floor is low and no in-scope hit is required.
+    ("neu-silicon-valley-luma", "https://luma.com/NUSiliconValleyCampus", True),
+    ("luma-genai-sf", "https://luma.com/genai-sf", True),
+    ("neu-bayarea-student-life", "https://studentlife.bayarea.northeastern.edu/events/", True),
+    ("cerebral-valley-events", "https://cerebralvalley.ai/events", True),
+    ("luma-sf", "https://luma.com/sf", True),
+    ("luma-ai-sf", "https://luma.com/ai-sf", True),
+    # Eventbrite is judged on category, since its listings are career fairs,
+    # which no other source surfaces. No in-scope hit is required.
     ("eventbrite-sf-tech-career",
-     "https://www.eventbrite.com/d/ca--san-francisco/tech-career-fair/", 3, False),
+     "https://www.eventbrite.com/d/ca--san-francisco/tech-career-fair/", False),
 ]
 TESLA = "https://tesla.com/event/northeastern-resume"
 
@@ -4310,14 +4311,14 @@ def live() -> None:
 
     section("JSON-LD sources - silent zero is the failure to catch")
     total = kept = 0
-    for name, url, floor, in_region in JSONLD_SOURCES:
+    for name, url, in_region in JSONLD_SOURCES:
         try:
             events = JsonLdSource(name, url, http).fetch()
             scoped = [e for e in events if geo.keep(e)]
             total += len(events)
             kept += len(scoped)
-            check(f"{name} returns at least {floor} events",
-                  len(events) >= floor, f"got {len(events)} - pattern may have broken")
+            check(f"{name} returns at least one event",
+                  bool(events), "got 0 - pattern may have broken")
             if in_region:
                 warn(f"{name} keeps at least one event after the geo filter",
                      bool(scoped), f"{len(events)} fetched, 0 in scope")
