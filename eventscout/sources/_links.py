@@ -8,6 +8,7 @@ copies of the same rule drift apart.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from ._text import strip_html
 
@@ -64,7 +65,27 @@ _ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
 _ASSET_PATHS = ("/static_assets/", "/assets/", "/images/", "/img/", "/icons/",
                 "/logos/", "/cdn-cgi/")
 
+# Luma pages that are app, account or meeting plumbing, not an event. The bare
+# "luma.com/" hint above accepts every one of them, and one full fetch sent
+# about 20 such links from Luma mail to the extractor. Opened anonymously on
+# 2026-10-09, /android lands on Google Play and /join/g-... on a Microsoft Teams
+# launcher. /e/ticket/ is deliberately absent, because a ticket link redirects
+# to its public event page.
+_LUMA_HOSTS = frozenset({"luma.com", "www.luma.com", "lu.ma"})
+# Matched as the whole first path segment, so a slug that merely starts with
+# one, such as luma.com/iosdevs, is still an event.
+_LUMA_PLUMBING_SEGMENTS = frozenset({"android", "ios", "settings", "discover", "join"})
+_LUMA_PLUMBING_PREFIXES = ("/event/manage/",)
+
 _TITLE_MAX = 200
+
+
+def _is_luma_plumbing(lowered: str) -> bool:
+    parts = urlsplit(lowered)
+    if parts.hostname not in _LUMA_HOSTS:
+        return False
+    first = parts.path.strip("/").split("/", 1)[0]
+    return first in _LUMA_PLUMBING_SEGMENTS or parts.path.startswith(_LUMA_PLUMBING_PREFIXES)
 
 
 def is_event_link(href: str) -> bool:
@@ -74,6 +95,8 @@ def is_event_link(href: str) -> bool:
     if any(t in lowered for t in _TRACKER_HOSTS):
         return False
     if any(host in lowered for host in _IGNORED_HOSTS):
+        return False
+    if _is_luma_plumbing(lowered):
         return False
     return any(hint in lowered for hint in _EVENT_HINTS)
 

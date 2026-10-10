@@ -9,7 +9,7 @@ import yaml
 
 from .geo import GeoFilter
 from .protocols import EventSource
-from .http import HttpClient, UrllibHttpClient
+from .http import HostRateLimiter, HttpClient, UrllibHttpClient
 from .sources.eightfold import EightfoldSource
 from .sources.gmail_label import GmailLabelSource
 from .sources.jsonld import JsonLdSource
@@ -293,9 +293,13 @@ def build_runtime(settings: Settings, channels: dict):
     from .extract import PageFactExtractor
     from .scoring import build_invoker
 
+    # 60 per 6 minutes stays under the roughly 103 that passed in 6 minutes
+    # (see HostRateLimiter). One full fetch makes about 54 luma.com requests,
+    # so the cap stays idle until a run grows past that.
     http = UrllibHttpClient(timeout=settings.request_timeout,
                             user_agent=settings.user_agent,
-                            min_delay=0.2, max_delay=0.8)
+                            min_delay=0.2, max_delay=0.8,
+                            limiter=HostRateLimiter(60, 360))
     invoker = build_invoker(settings)
     # The client itself is not returned: neither entry point uses it, and
     # keeping it would be an extension point with no consumer, which is the

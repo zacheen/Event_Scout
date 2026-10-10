@@ -30,6 +30,8 @@ import subprocess
 import json
 import sys
 import tempfile
+import threading
+import time
 import traceback
 
 import yaml
@@ -43,8 +45,8 @@ from eventscout.config import (_parse_labels, build_geo, build_runtime, build_so
                                load_channels,
                                load_settings)
 from eventscout.geo import GeoFilter
-from eventscout.http import (HttpClient, StubHttpClient, UrllibHttpClient,
-                             _decode_body)
+from eventscout.http import (HostRateLimiter, HttpClient, StubHttpClient,
+                             UrllibHttpClient, _decode_body)
 from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
                                  build_ics, format_digest)
 from eventscout import notifier as notifier_module, pipeline, protocols
@@ -680,6 +682,77 @@ def offline() -> None:
         _urlreq.urlopen = _real_urlopen
     check("get_text reads Content-Encoding off the response, not just the body",
           wired == page, f"{wired[:40]!r}")
+
+    section("http.HostRateLimiter - a count per sliding window, per host")
+    _now = [0.0]
+    _slept: list[float] = []
+
+    def _fake_sleep(seconds):
+        _slept.append(seconds)
+        _now[0] += seconds
+
+    lim = HostRateLimiter(2, 10.0, clock=lambda: _now[0], sleep=_fake_sleep)
+    first_two = [lim.acquire("luma.com"), lim.acquire("luma.com")]
+    check("requests up to the cap do not wait", first_two == [0.0, 0.0], f"waited {first_two}")
+    # Asked while luma.com is full, so one shared window would make it wait.
+    check("another host keeps its own count", lim.acquire("example.test") == 0.0)
+    third = lim.acquire("luma.com")
+    check("the one past the cap waits until the oldest leaves the window",
+          third == 10.0 and _slept == [10.0], f"waited {third}, slept {_slept}")
+    # Window now holds [10], so one more at t=10 fits. At t=15 it holds
+    # [10, 10], so the wait is 5 s, until t=20.
+    check("a free slot inside the window is used at once", lim.acquire("luma.com") == 0.0)
+    _now[0] = 15.0
+    fifth = lim.acquire("luma.com")
+    check("the wait is measured from the oldest request, not a fixed reset",
+          fifth == 5.0, f"waited {fifth}")
+    refused = False
+    try:
+        HostRateLimiter(0, 10.0)
+    except ValueError:
+        refused = True
+    check("a cap of zero is refused, since it would never grant a slot", refused)
+
+    # Sleeping under the lock would hold up another host's request while a
+    # waiter is parked inside sleep. The parked sleep raises when released,
+    # because on a frozen clock the waiter would otherwise loop forever.
+    _release = threading.Event()
+
+    def _parked_sleep(_seconds):
+        _release.wait(3)
+        raise RuntimeError("released")
+
+    parked = HostRateLimiter(1, 10.0, clock=lambda: 0.0, sleep=_parked_sleep)
+    parked.acquire("a.test")
+
+    def _wait_quietly():
+        with contextlib.suppress(RuntimeError):
+            parked.acquire("a.test")
+
+    threading.Thread(target=_wait_quietly, daemon=True).start()
+    # Too short a pause only misses the bug, it cannot fail a correct limiter.
+    time.sleep(0.1)
+    _other_done = threading.Event()
+    threading.Thread(target=lambda: (parked.acquire("b.test"), _other_done.set()),
+                     daemon=True).start()
+    check("one host's wait does not hold up another host", _other_done.wait(1.0),
+          "the waiter sleeps while holding the lock")
+    _release.set()
+
+    _now[0] = 0.0
+    _slept.clear()
+    wired_limit = UrllibHttpClient(timeout=1, limiter=HostRateLimiter(
+        1, 10.0, clock=lambda: _now[0], sleep=_fake_sleep))
+    try:
+        _urlreq.urlopen = lambda req, timeout=None: _FakeResponse(b"ok", {})
+        wired_limit.get_text("https://luma.com/a?x=1")
+        wired_limit.get_text("https://example.test/b")
+        check("get_text gives each host its own slot", _slept == [], f"slept {_slept}")
+        wired_limit.get_text("https://LUMA.com/c")
+        check("and waits on the same host, whatever its case",
+              _slept == [10.0], f"slept {_slept}")
+    finally:
+        _urlreq.urlopen = _real_urlopen
 
     section("pipeline - the first run shows what the rank floor cut")
     # "Print everything and let me choose" only holds if the floor is shown
@@ -3244,6 +3317,9 @@ def offline() -> None:
     check("build_runtime hands back an extractor even with no model configured",
           _modelless_runtime is not None and not _modelless_runtime.prose_enabled,
           "the free schema.org path is disabled on every keyword-only run")
+    check("build_runtime's client caps requests per host",
+          isinstance(getattr(_modelless_runtime._http, "_limiter", None), HostRateLimiter),
+          "the extraction pool can fire luma.com requests with no cap")
 
     # Regression for _facts_from_jsonld's "prefer the url match" rule (see its
     # docstring): the first node found is not necessarily this event's own.
@@ -3491,6 +3567,23 @@ def offline() -> None:
         # it must stay rejected.
         ("https://app3.greenhouse.io/e/arnmvw", False,
          "a Greenhouse /e/ form that is not an event"),
+        # Luma plumbing and the look-alikes that stay events, see
+        # _LUMA_PLUMBING_SEGMENTS in _links.py.
+        ("https://luma.com/android", False, "Luma's Android app link"),
+        ("https://luma.com/ios", False, "Luma's iOS app link"),
+        ("https://luma.com/settings", False, "Luma's account settings"),
+        ("https://luma.com/discover", False, "Luma's discover listing"),
+        ("https://luma.com/join/g-abc123", False,
+         "a Luma join link, which opens a Teams meeting"),
+        ("https://lu.ma/join/g-abc", False, "the same join link on lu.ma"),
+        ("https://luma.com/event/manage/evt-abc123/guests", False,
+         "a host's guest-management page"),
+        ("https://luma.com/e/ticket/evt-abc123", True,
+         "a Luma ticket link, which redirects to its public event page"),
+        ("https://luma.com/iosdevs", True,
+         "a Luma slug that only starts with a plumbing word"),
+        ("https://www.example-events.com/discover/event/abc", True,
+         "a non-Luma event under /discover/, since the list is Luma's own paths"),
     ]
     for url, want, why in link_cases:
         check(f"{'accepts' if want else 'rejects'} {why}",
