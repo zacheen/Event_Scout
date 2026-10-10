@@ -9,6 +9,7 @@
 # the next paragraph is a human note that nothing reads and nothing warns about.
 #   jsonld:       name; url; status
 #   wordpress:    name; url; status
+#   eightfold:    name; url (must keep its ?domain=); status
 #   gmail:        status; newer_than_days; max_messages  (mailbox and labels come from .env)
 #   newsletters:  name; host; status; archive_path (default /archive)
 #
@@ -426,6 +427,26 @@ wordpress:
   # and would need LLM date extraction for a low yield. Endpoint kept here only
   # so it is not re-probed from scratch:
   #   https://neurai.sites.northeastern.edu/wp-json/wp/v2/posts  (RSS at /feed/)
+
+# ---------------------------------------------------------------------------
+# TIER A1d - Eightfold employer event pages, a fourth structured path.
+# Many employers list their recruiting events on Eightfold at
+# <tenant>.eightfold.ai/events/open?domain=<employer domain>. The page carries
+# no usable markup, so the adapter reads the JSON list the page itself calls,
+# which gives typed timestamps, venue and attendance mode. Another employer is
+# one more entry, as long as its URL keeps the ?domain= parameter, because the
+# list endpoint answers 401 without it.
+# ---------------------------------------------------------------------------
+eightfold:
+  - name: astrazeneca-eightfold
+    adapter: eightfold
+    url: https://astrazeneca.eightfold.ai/events/open?domain=astrazeneca.com
+    status: verified
+    # Probed 2026-10-09, 8 events on one page, none of them in the Bay Area.
+    # Two are "Early Career Opportunities" registrations open from 2026-02-11
+    # to 2026-12-31 and listed at the Gaithersburg, MD site, so the date
+    # window drops them as already started and the geo filter drops them as
+    # out of region, although registering is done online from anywhere.
 
 # ---------------------------------------------------------------------------
 # TIER B - Bay Area event platforms. Higher value here than in Boston because

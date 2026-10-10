@@ -10,6 +10,7 @@ import yaml
 from .geo import GeoFilter
 from .protocols import EventSource
 from .http import HttpClient, UrllibHttpClient
+from .sources.eightfold import EightfoldSource
 from .sources.gmail_label import GmailLabelSource
 from .sources.jsonld import JsonLdSource
 from .sources.newsletter import NewsletterArchiveSource
@@ -209,7 +210,7 @@ def _build_gmail_sources(entry: dict, user: str, password: str,
                          skip_from: str) -> list[EventSource]:
     """One mailbox source per label, or none with a reason on stdout.
 
-    Split out of build_sources so that function stays four parallel blocks of
+    Split out of build_sources so that function stays five parallel blocks of
     one test and one append. Skipping is right here, but silently skipping is
     not: an unset credential otherwise looks like a quiet mailbox. The two
     causes are named apart because the fix differs, one being a missing secret
@@ -263,6 +264,9 @@ def build_sources(channels: dict, http: HttpClient,
     for entry in channels.get("wordpress") or []:
         if entry.get("status") == "verified" and entry.get("url"):
             sources.append(WordPressSource(entry["name"], entry["url"], http))
+    for entry in channels.get("eightfold") or []:
+        if entry.get("status") == "verified" and entry.get("url"):
+            sources.append(EightfoldSource(entry["name"], entry["url"], http))
     for entry in channels.get("gmail") or []:
         if entry.get("status") == "verified":
             sources += _build_gmail_sources(

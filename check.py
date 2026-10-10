@@ -64,6 +64,7 @@ from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
                                parse_iso)
 from eventscout.extract import PageFactExtractor
 from eventscout.sources._links import is_event_link, tails
+from eventscout.sources.eightfold import EightfoldSource
 from eventscout.sources.gmail_label import GmailLabelSource
 from eventscout.sources._text import strip_html
 from eventscout.sources.jsonld import JsonLdSource
@@ -277,6 +278,12 @@ def offline() -> None:
         # would only be caught by the name-only scan, which cannot see params.
         (protocols.BoundedSource, WordPressSource("n", "http://x/", _stub),
          "WordPressSource (coverage)"),
+        (protocols.EventSource,
+         EightfoldSource("n", "https://x.eightfold.ai/events/open?domain=x.com", _stub),
+         "EightfoldSource"),
+        (protocols.BoundedSource,
+         EightfoldSource("n", "https://x.eightfold.ai/events/open?domain=x.com", _stub),
+         "EightfoldSource (coverage)"),
         (protocols.EventSource,
          GmailLabelSource("n", "u", "p", "label"), "GmailLabelSource"),
         (protocols.BoundedSource,
@@ -2356,15 +2363,30 @@ def offline() -> None:
                    {"name": "pattern", "url": "https://x/p", "status": "verified_pattern"},
                    {"name": "live", "url": "https://x/r", "status": "verified"}],
         "wordpress": [{"name": "wp-held", "url": "https://x/w", "status": "verified_but_held"}],
+        "eightfold": [{"name": "ef-held", "url": "https://a.eightfold.ai/events/open?domain=a.com",
+                       "status": "verified_but_held"}],
         "newsletters": [{"name": "nl-held", "host": "x.beehiiv.com", "status": "verified_but_held"}],
     }
     started = sorted(s.name for s in build_sources(adversarial, StubHttpClient({})))
     check("only an exactly-verified entry is started", started == ["live"],
           f"started {started}")
 
+    # Derived from what config.py imports rather than listed, so the next
+    # adapter is covered without anyone remembering to add it here. The floor
+    # of 5, today's adapter count, stops a derivation that finds nothing from
+    # passing vacuously, so lower it when an adapter is retired.
+    from eventscout import config as _config_mod
+    _kinds = {obj.kind for obj in vars(_config_mod).values()
+              if isinstance(obj, type) and obj.__module__.startswith("eventscout.sources.")}
+    _unranked = _kinds - set(load_settings().source_precedence)
+    check("every source kind has a place in config.yaml source_precedence",
+          len(_kinds) >= 5 and not _unranked,
+          f"kinds {sorted(_kinds)}, unranked {sorted(_unranked)}. _collapse sorts an "
+          f"unranked kind last, so its typed fields lose to a mailbox copy")
+
     # The inverse, which an earlier review asked for and which was never
     # added. That fix only corrected the one entry then claiming coverage,
-    # leaving nothing to stop the next one. build_sources reads four blocks of
+    # leaving nothing to stop the next one. build_sources reads five blocks of
     # channels.yaml and cannot see the rest, while `verified` is exact-matched
     # everywhere else in that file to mean "started", so the word inside an
     # unread block claims coverage the pipeline does not have. The blocks are
@@ -2389,6 +2411,24 @@ def offline() -> None:
               not claiming,
               f"{claiming} reads as live coverage to anyone auditing "
               f"channels.yaml, but build_sources never opens {block!r}")
+
+    # Built from the real file. A constructor that validates its entry, as
+    # EightfoldSource does with ?domain=, would otherwise first fail in a
+    # scheduled run, where build_sources raising takes every other source down.
+    try:
+        # gmail is left out: it builds nothing without credentials, and its
+        # sources are named per label rather than per entry.
+        _built = {s.name for s in build_sources(
+            {k: v for k, v in load_channels().items() if k != "gmail"}, StubHttpClient({}))}
+        _verified = {e.get("name") for block in read_blocks - {"gmail"}
+                     for e in load_channels().get(block) or []
+                     if isinstance(e, dict) and e.get("status") == "verified"}
+        check("every verified channels.yaml entry constructs offline",
+              bool(_verified) and _verified <= _built,
+              f"not started {sorted(_verified - _built)}")
+    except Exception:
+        check("every verified channels.yaml entry constructs offline", False,
+              traceback.format_exc(limit=2))
 
     # TODO item 4's fix is two call sites away from the code that enforces it,
     # and mutating either one leaves every behavioural test in the mailbox
@@ -2859,6 +2899,133 @@ def offline() -> None:
     check("so an item with only those two keys takes the UTC one",
           _got.start.startswith("2026-09-03T14:00:00"), f"start {_got.start!r}")
 
+    section("sources.eightfold - the JSON list behind a script-rendered page")
+    _ef_page = "https://acme.eightfold.ai/api/events/open/list?domain=acme.com&page="
+    _ef_url = "https://acme.eightfold.ai/events/open?domain=acme.com"
+
+    def _ef_item(enc, **kw):
+        item = {"name": f"Event {enc}",
+                "eventLandingPage":
+                    f"https://acme.eightfold.ai/events/candidate?plannedEventId={enc}",
+                "startTimestamp": 1792105200, "endTimestamp": 1792110644,
+                "eventLocationType": "in_person", "venue": "", "completeVenue": "",
+                "institution": "", "description": "", "isCancelled": False}
+        item.update(kw)
+        return item
+
+    # The stub has no page 3, so reading one raises: that is what proves the
+    # stated total ends the walk.
+    _ef_pages = {
+        _ef_page + "1": json.dumps({"totalEventsCount": 5, "plannedEventList": [
+            _ef_item("a", venue="Canfield Court",
+                     completeVenue="Canfield Court, Stanford Campus",
+                     description="<p>Thank&nbsp;you</p>"),
+            _ef_item("b", eventLocationType="virtual_event",
+                     address="https://teams.microsoft.com/meet/1"),
+            _ef_item("c", venue="TBD", completeVenue="TBD",
+                     institution="Georgia Institute of Technology")]}),
+        _ef_page + "2": json.dumps({"totalEventsCount": 5, "plannedEventList": [
+            _ef_item("d", isCancelled=True),
+            _ef_item("e", endTimestamp=None, venue="Smith Auditorium", institution="MIT")]}),
+    }
+    try:
+        _ef_src = EightfoldSource("ef", _ef_url, StubHttpClient(_ef_pages))
+        _ef = {e.url.rsplit("=", 1)[-1]: e for e in _ef_src.fetch()}
+        check("page 2 is read and the stated total ends the walk",
+              "e" in _ef and _ef_src.coverage() is None,
+              f"got {sorted(_ef)}, coverage {_ef_src.coverage()}")
+        check("a cancelled event is not an event", "d" not in _ef,
+              f"got {sorted(_ef)}")
+        check("each event keeps its own ?plannedEventId= URL",
+              len({e.url for e in _ef.values()}) == 4,
+              f"urls {[e.url for e in _ef.values()]}")
+        check("the epoch start and end become UTC instants",
+              _ef["a"].start == "2026-10-15T23:00:00+00:00"
+              and _ef["a"].end == "2026-10-16T00:30:44+00:00",
+              f"start {_ef['a'].start!r}, end {_ef['a'].end!r}")
+        check("a completeVenue that repeats its venue names it once",
+              _ef["a"].location == "Canfield Court, Stanford Campus",
+              f"location {_ef['a'].location!r}")
+        check("institution names the campus a TBD venue leaves out",
+              _ef["c"].location == "Georgia Institute of Technology, TBD",
+              f"location {_ef['c'].location!r}")
+        check("and counts as already named only as a whole word",
+              _ef["e"].location == "MIT, Smith Auditorium",
+              f"location {_ef['e'].location!r}")
+        check("an absent endTimestamp leaves the end empty",
+              _ef["e"].end == "" and _ef["e"].start, f"end {_ef['e'].end!r}")
+        check("a virtual event is ONLINE, located Online, never at its meeting link",
+              _ef["b"].attendance_mode is AttendanceMode.ONLINE
+              and _ef["b"].location == "Online"
+              and _ef["a"].attendance_mode is AttendanceMode.OFFLINE,
+              f"b {_ef['b'].attendance_mode!r} at {_ef['b'].location!r}")
+        check("so it is not sent to the extractor to fetch the script-rendered page",
+              not PageFactExtractor.needs_extraction(_ef["b"]),
+              f"location {_ef['b'].location!r}")
+        check("the employer domain stands in for the missing organizer",
+              _ef["a"].organizer == "acme.com", f"organizer {_ef['a'].organizer!r}")
+        check("the description arrives as plain text",
+              _ef["a"].description == "Thank you", f"{_ef['a'].description!r}")
+    except Exception:
+        check("eightfold stub fetch ran", False, traceback.format_exc(limit=3))
+
+    _ef_capped = EightfoldSource("ef", _ef_url, StubHttpClient(_ef_pages), max_pages=1)
+    _ef_capped.fetch()
+    check("a cap that stops the walk early says how much went unread",
+          _ef_capped.coverage() == Coverage(3, "events", 5),
+          f"coverage {_ef_capped.coverage()!r}")
+
+    _ef_untotalled = EightfoldSource("ef", _ef_url, StubHttpClient({
+        _ef_page + "1": json.dumps({"plannedEventList": [_ef_item("a")]}),
+        _ef_page + "2": json.dumps({"plannedEventList": []})}))
+    try:
+        _n = len(_ef_untotalled.fetch())
+        check("with no stated total, an empty page ends the walk",
+              _n == 1 and _ef_untotalled.coverage() is None, f"got {_n}")
+    except Exception:
+        check("with no stated total, an empty page ends the walk", False,
+              traceback.format_exc(limit=2))
+
+    for _bad_url, _rule in [
+            ("https://acme.eightfold.ai/events/open",
+             "a URL without ?domain= is refused at construction"),
+            ("acme.eightfold.ai/events/open?domain=acme.com",
+             "a URL without its scheme, so with no host, is refused at construction")]:
+        try:
+            EightfoldSource("ef", _bad_url, StubHttpClient({}))
+            check(_rule, False, f"accepted {_bad_url!r}")
+        except ValueError:
+            check(_rule, True)
+
+    # Without the check, True and -1 would be dated at the 1970 epoch and the
+    # rest would fail with an error that does not name the field.
+    for _bad_ts in (1792105200000, -1, True, "1792105200", float("nan")):
+        _rule = f"startTimestamp {_bad_ts!r} raises, naming the field"
+        _ef_bad = EightfoldSource("ef", _ef_url, StubHttpClient({_ef_page + "1": json.dumps(
+            {"totalEventsCount": 1,
+             "plannedEventList": [_ef_item("a", startTimestamp=_bad_ts)]})}))
+        try:
+            _ef_bad.fetch()
+            check(_rule, False, "accepted")
+        except ValueError as exc:
+            check(_rule, "startTimestamp" in str(exc), str(exc))
+    # None would read as "read everything" (see BoundedSource.coverage).
+    try:
+        _ef_bad.coverage()
+        check("a fetch that raised mid-mapping leaves coverage() unanswerable", False,
+              f"answered {_ef_bad.coverage()!r}")
+    except RuntimeError:
+        check("a fetch that raised mid-mapping leaves coverage() unanswerable", True)
+
+    try:
+        EightfoldSource("ef", _ef_url, StubHttpClient({
+            _ef_page + "1": json.dumps({"totalEventsCount": 0})})).fetch()
+        check("a response without plannedEventList raises instead of reading as empty",
+              False, "returned normally, which is a silent zero")
+    except ValueError:
+        check("a response without plannedEventList raises instead of reading as empty",
+              True)
+
     section("geo.GeoFilter - single-arg, satisfies EventFilter")
     geo = GeoFilter(("san jose", "san francisco"),
                     accept_virtual=True,
@@ -3175,6 +3342,11 @@ def offline() -> None:
           f"start={kept.start!r} end={kept.end!r}")
     check("and the location it was run for is still filled",
           kept.location == "Amsterdam, Netherlands", f"got {kept.location!r}")
+    ef_kept = _extract_located(_prose_page, "eightfold", _MidnightReader())
+    check("an Eightfold start survives the same run, since it is a typed epoch too",
+          ef_kept.start == "2026-10-05T01:00:00-07:00"
+          and ef_kept.end == "2026-10-07T10:00:00-07:00",
+          f"start={ef_kept.start!r} end={ef_kept.end!r}")
     typed_kept = _extract_located(
         _ld("https://luma.com/x", start="2026-10-05T00:00:00-07:00"), "jsonld",
         _Refuser())
@@ -3847,6 +4019,24 @@ def live() -> None:
         print(f"         {len(events)} events, {len(drifted)} with start != publish date")
     except Exception:
         check("alumni endpoint fetched", False, traceback.format_exc(limit=2))
+
+    section("Eightfold source - the list endpoint behind a script-rendered page")
+    try:
+        ef = EightfoldSource(
+            "astrazeneca-eightfold",
+            "https://astrazeneca.eightfold.ai/events/open?domain=astrazeneca.com", http)
+        events = ef.fetch()
+        check("astrazeneca returns at least 3 events", len(events) >= 3,
+              f"got {len(events)} - the endpoint or its shape may have changed")
+        check("every event carries a start, read from its epoch timestamp",
+              all(e.has_known_start for e in events),
+              f"{sum(not e.has_known_start for e in events)} without one")
+        check("every event keeps its own URL", len({e.url for e in events}) == len(events),
+              "two events share a URL, so canon_url dropped ?plannedEventId=")
+        check("the list was read to its end", ef.coverage() is None, str(ef.coverage()))
+        print(f"         {len(events)} events")
+    except Exception:
+        check("astrazeneca endpoint fetched", False, traceback.format_exc(limit=2))
 
 
 def main() -> int:

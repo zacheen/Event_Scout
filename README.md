@@ -27,10 +27,11 @@ A run with nothing new and no last-call reminder due sends no mail at all. That 
 
 ## Sources
 
-Four adapters cover every channel, so adding a site is usually a config entry rather than code.
+Five adapters cover every channel, so adding a site is usually a config entry rather than code.
 
 - `jsonld` reads schema.org `Event` markup. Dates arrive as typed fields, which removes the largest correctness risk in the project, namely a model guessing a date or a timezone.
 - `wordpress_rest` reads a site's `/wp-json` event post type.
+- `eightfold` reads an employer's recruiting events from its Eightfold events page, through the JSON list that page loads, so another employer on Eightfold is one more entry.
 - `newsletter` reads a beehiiv publication's public archive and harvests the event links out of each issue.
 - `gmail_label` reads one Gmail label over IMAP with an app password. It opens All Mail read-only and searches it for the label, issues no command that changes the mailbox, and fetches bodies with `BODY.PEEK`, so nothing is marked as read. A Gmail rule decides what lands in the label, which means a new newsletter needs no code change at all.
 

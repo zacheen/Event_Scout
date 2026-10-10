@@ -185,7 +185,7 @@ unknown_time_max_urgency: "P1"
 # as a labelled newsletter and as JSON-LD from cerebralvalley.ai/events. On a
 # collision prefer the structured record: its dates are typed rather than parsed
 # out of prose, which is the largest correctness risk in the whole pipeline.
-source_precedence: ["jsonld", "wordpress_rest", "newsletter", "gmail_label"]
+source_precedence: ["jsonld", "wordpress_rest", "eightfold", "newsletter", "gmail_label"]
 
 # --- Run behaviour ---------------------------------------------------------
 # What the very first run does with a backlog nothing has reported yet.
