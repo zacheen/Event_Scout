@@ -10,7 +10,7 @@
 #   jsonld:       name; url; status
 #   wordpress:    name; url; status
 #   eightfold:    name; url (must keep its ?domain=); status
-#   luma_discover: name; category; latitude; longitude; status; days_ahead (default 21)
+#   luma_discover: name; category; latitude; longitude; status; days_ahead (default 30)
 #   gmail:        status; newer_than_days; max_messages  (mailbox and labels come from .env)
 #   newsletters:  name; host; status; archive_path (default /archive)
 #
@@ -464,11 +464,13 @@ luma_discover:
     category: ai
     latitude: 37.7749
     longitude: -122.4194
-    days_ahead: 21
+    days_ahead: 30
     status: verified
     # Luma's own aggregation across many SF AI calendars, so it reaches
     # organisers we do not track individually.
-    # Probed 2026-10-09: 21 days took 6 pages, 14 days 5 and 30 days 7. All
+    # Probed 2026-10-09: 30 days took 7 pages, 21 days 6 and 14 days 5, and
+    # the seventh page's last event started 49 days out, since paging stops
+    # on a whole page. All
     # 25 events the page's JSON-LD carried were in the API's first 50, and
     # the JSON-LD gave none of them a description either. It named only a
     # venue or street for 15 of those 25, which the geo filter dropped, while

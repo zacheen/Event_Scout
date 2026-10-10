@@ -39,7 +39,7 @@ class LumaDiscoverSource:
     kind: ClassVar[str] = "luma_discover"
 
     def __init__(self, name: str, category: str, latitude: float, longitude: float,
-                 http: HttpClient, days_ahead: int = 21, max_pages: int = 10,
+                 http: HttpClient, days_ahead: int = 30, max_pages: int = 10,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         if not category:
             raise ValueError(f"{name}: a Luma discover source needs its category slug")

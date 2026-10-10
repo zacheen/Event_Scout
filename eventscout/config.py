@@ -273,7 +273,7 @@ def build_sources(channels: dict, http: HttpClient,
             sources.append(LumaDiscoverSource(
                 entry["name"], entry["category"],
                 float(entry["latitude"]), float(entry["longitude"]), http,
-                days_ahead=int(entry.get("days_ahead", 21))))
+                days_ahead=int(entry.get("days_ahead", 30))))
     for entry in channels.get("gmail") or []:
         if entry.get("status") == "verified":
             sources += _build_gmail_sources(
