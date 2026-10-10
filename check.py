@@ -3611,7 +3611,8 @@ def offline() -> None:
     check("a node referring to itself by a relative url still matches",
           relative.start == "2026-09-20T18:00:00-07:00", f"got {relative.start!r}")
 
-    # See _keep_typed_dates: a JSON-LD start is never re-dated by the page.
+    # See _keep_typed_dates: a start from a _TYPED_START_KINDS source is never
+    # re-dated by the page.
     def _extract_located(html, source_kind, invoker):
         event = _event(event_uid=f"{source_kind}:https://luma.com/x",
                        url="https://luma.com/x", source_kind=source_kind,

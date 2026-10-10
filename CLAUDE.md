@@ -18,8 +18,10 @@
   cp950 machine raises `UnicodeEncodeError` on the Chinese in every score reason. The
   run itself completes, so the failure looks like a crash while the ledger has already
   moved. Same flag for `check.py`.
-- Luma rate-limits. Three full fetches within a few minutes earns `HTTP Error 429` on
-  the four luma sources, which surfaces as `check.py` failures that are not regressions.
+- Luma rate-limits by how many requests arrive over a few minutes, not by the gap between them. A 429 blocks the whole luma.com host, calendar pages included, and carries no `Retry-After`. Measured 2026-10-09, so re-measure before leaning on the numbers.
+  - About 103 requests inside 6 minutes passed. About 163 inside 2.2 minutes earned `HTTP Error 429`, which lifted 4 to 8 minutes later.
+  - One full fetch makes about 54 luma.com requests. Three full fetches run back to back, 162 requests over 16 minutes, all passed.
+  - Runs that overlap are what reach it, such as a manual run or `check.py` started beside the scheduled one. `HostRateLimiter` caps each host at 60 requests per 6 minutes, but only inside one process. A 429 then surfaces as `check.py` failures that are not regressions.
 
 ## Verifying a change
 
