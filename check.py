@@ -2485,6 +2485,26 @@ def offline() -> None:
           f"kinds {sorted(_kinds)}, unranked {sorted(_unranked)}. _collapse sorts an "
           f"unranked kind last, so its typed fields lose to a mailbox copy")
 
+    # The same derivation for extract.py's two kind lists, which a new adapter
+    # has to be sorted into by hand. Left out of _TYPED_START_KINDS, a model
+    # reading the event page may overwrite a start its source typed exactly.
+    # wordpress_rest is in neither on purpose, since its start can be the post
+    # date that the event's own page is meant to correct.
+    from eventscout.extract import _PROSE_KINDS, _TYPED_START_KINDS
+    _in_neither = frozenset({"wordpress_rest"})
+    _unsorted = _kinds - (_PROSE_KINDS | _TYPED_START_KINDS | _in_neither)
+    check("every source kind is sorted into _PROSE_KINDS, _TYPED_START_KINDS or the "
+          "deliberate exceptions",
+          len(_kinds) >= 6 and not _unsorted,
+          f"unsorted {sorted(_unsorted)}. An adapter with a typed start left out of "
+          f"_TYPED_START_KINDS can have that start re-dated by a model")
+    _contradicted = _in_neither & (_PROSE_KINDS | _TYPED_START_KINDS)
+    _stale = (_PROSE_KINDS | _TYPED_START_KINDS | _in_neither) - _kinds
+    check("those lists name no kind that no adapter has, and no exception is also listed",
+          not _stale and not _contradicted,
+          f"stale {sorted(_stale)}, contradicted {sorted(_contradicted)}. A renamed "
+          f"adapter would otherwise fall out of its list without failing anything")
+
     # The inverse, which an earlier review asked for and which was never
     # added. That fix only corrected the one entry then claiming coverage,
     # leaving nothing to stop the next one. build_sources reads six blocks of
