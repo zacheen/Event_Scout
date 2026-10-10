@@ -1,6 +1,6 @@
 ---
 name: event-scout-daily-run
-description: Runs the Event Scout local run in Event_Scout every day at 3 PM, which sends real mail, and checks the output for logic violations or new issues
+description: Runs the Event Scout local run in Event_Scout, which sends real mail, and checks the output by the rules in SCHEDULED_RUN.md
 ---
 
 Read D:\dont_move\git_save\Event_Scout\SCHEDULED_RUN.md, then follow the steps in that file exactly.

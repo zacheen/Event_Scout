@@ -10,6 +10,7 @@
 #   jsonld:       name; url; status
 #   wordpress:    name; url; status
 #   eightfold:    name; url (must keep its ?domain=); status
+#   luma_discover: name; category; latitude; longitude; status; days_ahead (default 21)
 #   gmail:        status; newer_than_days; max_messages  (mailbox and labels come from .env)
 #   newsletters:  name; host; status; archive_path (default /archive)
 #
@@ -245,8 +246,9 @@ jsonld:
     status: verified
     # Probed 2026-09-07: 20 schema.org Events. This CLOSES the Luma spike that
     # was open since 2026-09-06. Every api.lu.ma/discover/* path returned 404,
-    # but the internal API was never needed -- the public calendar page carries
-    # JSON-LD. Do not chase the API.
+    # and the public calendar page carries JSON-LD, so this calendar needs no
+    # API. The discover listing does, see the luma_discover block, because its
+    # page renders only 25 events and api.luma.com, a different host, answers.
 
   - name: neu-bayarea-student-life
     adapter: jsonld
@@ -272,12 +274,7 @@ jsonld:
     # blank locations, e.g. "NVIDIA Dev Community Meetup", "Bay Area Frontier
     # Research Club", "Agents in Sales: Fireside Chat".
 
-  - name: luma-discover-sf-ai
-    adapter: jsonld
-    url: https://luma.com/discover/sf/ai
-    status: verified
-    # 25 events, 10 in scope, +8 new. Luma's own aggregation across many SF AI
-    # calendars, so it reaches organisers we do not track individually.
+  # Luma discover listings are read by the luma_discover block below, not here.
 
   - name: luma-ai-sf
     adapter: jsonld
@@ -447,6 +444,30 @@ eightfold:
     # to 2026-12-31 and listed at the Gaithersburg, MD site, so the date
     # window drops them as already started and the geo filter drops them as
     # out of region, although registering is done online from anywhere.
+
+# ---------------------------------------------------------------------------
+# TIER A1e - Luma discover listings, read through the API the page pages with.
+# luma.com/discover/<place>/<category> renders only its first 25 events, which
+# during SF Tech Week covered about a day, so the listing's events were first
+# seen a median of half a day before they started. The adapter follows
+# api.luma.com/discover/get-paginated-events instead, 50 entries a page, until
+# days_ahead is reached. The coordinates are the ones the page itself sends.
+# ---------------------------------------------------------------------------
+luma_discover:
+  - name: luma-discover-sf-ai
+    adapter: luma_discover
+    category: ai
+    latitude: 37.7749
+    longitude: -122.4194
+    days_ahead: 21
+    status: verified
+    # Luma's own aggregation across many SF AI calendars, so it reaches
+    # organisers we do not track individually.
+    # Probed 2026-10-09: 21 days took 6 pages, 14 days 5 and 30 days 7. All
+    # 25 events the page's JSON-LD carried were in the API's first 50, and
+    # the JSON-LD gave none of them a description either. It named only a
+    # venue or street for 15 of those 25, which the geo filter dropped, while
+    # the API's address names the city and kept 299 of the 300 it returned.
 
 # ---------------------------------------------------------------------------
 # TIER B - Bay Area event platforms. Higher value here than in Boston because

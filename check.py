@@ -70,6 +70,7 @@ from eventscout.sources.eightfold import EightfoldSource
 from eventscout.sources.gmail_label import GmailLabelSource
 from eventscout.sources._text import strip_html
 from eventscout.sources.jsonld import JsonLdSource
+from eventscout.sources.luma_discover import LumaDiscoverSource
 from eventscout.sources.newsletter import NewsletterArchiveSource, start_from_prose
 from eventscout.sources.wordpress import WordPressSource
 from eventscout.urls import canon_url
@@ -286,6 +287,10 @@ def offline() -> None:
         (protocols.BoundedSource,
          EightfoldSource("n", "https://x.eightfold.ai/events/open?domain=x.com", _stub),
          "EightfoldSource (coverage)"),
+        (protocols.EventSource,
+         LumaDiscoverSource("n", "ai", 0.0, 0.0, _stub), "LumaDiscoverSource"),
+        (protocols.BoundedSource,
+         LumaDiscoverSource("n", "ai", 0.0, 0.0, _stub), "LumaDiscoverSource (coverage)"),
         (protocols.EventSource,
          GmailLabelSource("n", "u", "p", "label"), "GmailLabelSource"),
         (protocols.BoundedSource,
@@ -2438,6 +2443,8 @@ def offline() -> None:
         "wordpress": [{"name": "wp-held", "url": "https://x/w", "status": "verified_but_held"}],
         "eightfold": [{"name": "ef-held", "url": "https://a.eightfold.ai/events/open?domain=a.com",
                        "status": "verified_but_held"}],
+        "luma_discover": [{"name": "ld-held", "category": "ai", "latitude": 0, "longitude": 0,
+                           "status": "verified_but_held"}],
         "newsletters": [{"name": "nl-held", "host": "x.beehiiv.com", "status": "verified_but_held"}],
     }
     started = sorted(s.name for s in build_sources(adversarial, StubHttpClient({})))
@@ -2446,20 +2453,20 @@ def offline() -> None:
 
     # Derived from what config.py imports rather than listed, so the next
     # adapter is covered without anyone remembering to add it here. The floor
-    # of 5, today's adapter count, stops a derivation that finds nothing from
+    # of 6, today's adapter count, stops a derivation that finds nothing from
     # passing vacuously, so lower it when an adapter is retired.
     from eventscout import config as _config_mod
     _kinds = {obj.kind for obj in vars(_config_mod).values()
               if isinstance(obj, type) and obj.__module__.startswith("eventscout.sources.")}
     _unranked = _kinds - set(load_settings().source_precedence)
     check("every source kind has a place in config.yaml source_precedence",
-          len(_kinds) >= 5 and not _unranked,
+          len(_kinds) >= 6 and not _unranked,
           f"kinds {sorted(_kinds)}, unranked {sorted(_unranked)}. _collapse sorts an "
           f"unranked kind last, so its typed fields lose to a mailbox copy")
 
     # The inverse, which an earlier review asked for and which was never
     # added. That fix only corrected the one entry then claiming coverage,
-    # leaving nothing to stop the next one. build_sources reads five blocks of
+    # leaving nothing to stop the next one. build_sources reads six blocks of
     # channels.yaml and cannot see the rest, while `verified` is exact-matched
     # everywhere else in that file to mean "started", so the word inside an
     # unread block claims coverage the pipeline does not have. The blocks are
@@ -3099,6 +3106,131 @@ def offline() -> None:
         check("a response without plannedEventList raises instead of reading as empty",
               True)
 
+    section("sources.luma_discover - pages past the 25 the discover page renders")
+    _ld_base = ("https://api.luma.com/discover/get-paginated-events?latitude=37.7749"
+                "&longitude=-122.4194&pagination_limit=50&slug=ai")
+    _ld_now = datetime(2026, 10, 10, tzinfo=timezone.utc)
+
+    def _ld_entry(slug, start, calendar="Personal", hosts=("Ada",), end=None, **event):
+        return {"event": {"url": slug, "name": f"Event {slug}", "start_at": start,
+                          "end_at": end or start, "location_type": "offline", **event},
+                "calendar": {"name": calendar}, "hosts": [{"name": h} for h in hosts]}
+
+    def _ld_page(entries, more, cursor=None):
+        return json.dumps({"entries": entries, "has_more": more, "next_cursor": cursor})
+
+    _ld_first = _ld_page([
+        _ld_entry("aaa11111", "2026-10-10T18:00:00.000Z", end="2026-10-10T20:00:00.000Z",
+                  geo_address_info={"full_address": "1 Main St, Palo Alto, CA 94301, USA",
+                                    "city_state": "Palo Alto, CA"}),
+        _ld_entry("bbb22222", "2026-10-11T18:00:00.000Z", geo_address_info={
+            "mode": "obfuscated", "city_state": "San Francisco, CA"})], True, "c1")
+    _ld_pages = {
+        _ld_base: _ld_first,
+        _ld_base + "&pagination_cursor=c1": _ld_page([
+            _ld_entry("ccc33333", "2026-10-12T18:00:00.000Z", location_type="online",
+                      calendar="Valley 101", hosts=("Valley 101", "Ada"))], False),
+    }
+
+    def _ld_source(pages, now=_ld_now, **kw):
+        return LumaDiscoverSource("ld", "ai", 37.7749, -122.4194, StubHttpClient(pages),
+                                  now=lambda: now, **kw)
+
+    _ld_src = _ld_source(_ld_pages)
+    _ld_by = {e.url: e for e in _ld_src.fetch()}
+    _a, _b, _c = (_ld_by.get(f"https://luma.com/{s}") for s in ("aaa11111", "bbb22222", "ccc33333"))
+    check("the cursor is followed to the next page", None not in (_a, _b, _c),
+          f"got {sorted(_ld_by)}")
+    check("a listing read to its end reports no coverage gap", _ld_src.coverage() is None,
+          str(_ld_src.coverage()))
+    if None not in (_a, _b, _c):
+        check("start and end are the API's instants in ISO form",
+              _a.start == "2026-10-10T18:00:00+00:00" and _a.end == "2026-10-10T20:00:00+00:00",
+              f"{_a.start} {_a.end}")
+        check("a public address is used whole", _a.location == "1 Main St, Palo Alto, CA 94301, USA",
+              _a.location)
+        check("a guests-only address falls back to its city", _b.location == "San Francisco, CA",
+              _b.location)
+        check("an online event is located Online, so it is not sent to the extractor",
+              _c.location == "Online" and _c.attendance_mode is AttendanceMode.ONLINE,
+              f"{_c.location!r} {_c.attendance_mode}")
+        check("the Personal placeholder calendar is not an organizer", _a.organizer == "Ada",
+              _a.organizer)
+        check("a real calendar leads and a host repeating it is named once",
+              _c.organizer == "Valley 101, Ada", _c.organizer)
+
+    # days_ahead=1 puts the horizon at 2026-10-11T00:00, which page 1's last
+    # entry already passes. Page 2 is absent, so reaching for it would show as
+    # a coverage gap rather than pass silently.
+    _ld_near = _ld_source({_ld_base: _ld_first}, days_ahead=1)
+    _ld_near_n = len(_ld_near.fetch())
+    check("paging stops once a page reaches days_ahead",
+          _ld_near_n == 2 and _ld_near.coverage() is None,
+          f"{_ld_near_n} events, coverage {_ld_near.coverage()}")
+    # Here the horizon lands exactly on page 1's last start, 2026-10-11T18:00.
+    _ld_edge = _ld_source({_ld_base: _ld_first}, days_ahead=1,
+                          now=datetime(2026, 10, 10, 18, tzinfo=timezone.utc))
+    _ld_edge.fetch()
+    check("a page ending exactly at the horizon also stops paging",
+          _ld_edge.coverage() is None, str(_ld_edge.coverage()))
+    _ld_empty = _ld_source({_ld_base: _ld_page([], True, "c1")})
+    _ld_empty.fetch()
+    check("an empty page that claims more is reported as a gap",
+          _ld_empty.coverage() is not None)
+    # 20261011 matters on its own, because iso_or_empty reads that integer as a
+    # basic-format date with no zone, so only the str test refuses it.
+    for _bad in (1760000000, "Oct 11 2026", 20261011):
+        try:
+            _ld_source({_ld_base: _ld_page([_ld_entry("ddd44444", _bad)], False)}).fetch()
+            check(f"a start_at of {_bad!r} raises instead of leaving the event undated",
+                  False, "returned normally, so every event would go to the extractor")
+        except ValueError:
+            check(f"a start_at of {_bad!r} raises instead of leaving the event undated", True)
+    # Values unlike the defaults, so a build_sources that drops or swaps one shows.
+    _ld_wired = build_sources({"luma_discover": [{
+        "name": "ld-wired", "category": "ai", "latitude": 1.5, "longitude": -2.5,
+        "days_ahead": 7, "status": "verified"}]}, StubHttpClient({}))[0]
+    check("build_sources passes days_ahead and both coordinates through",
+          _ld_wired._days_ahead == 7 and _ld_wired._params["latitude"] == "1.5"
+          and _ld_wired._params["longitude"] == "-2.5",
+          f"days_ahead {_ld_wired._days_ahead}, params {_ld_wired._params}")
+    _ld_capped = _ld_source(_ld_pages, max_pages=1)
+    _ld_capped.fetch()
+    check("max_pages cutting a listing short is reported", _ld_capped.coverage() is not None)
+    _ld_cut = _ld_source({_ld_base: _ld_first})
+    _ld_cut_n = len(_ld_cut.fetch())
+    check("a later page failing keeps the earlier pages and reports the gap",
+          _ld_cut_n == 2 and _ld_cut.coverage() is not None,
+          f"{_ld_cut_n} events, coverage {_ld_cut.coverage()}")
+    _ld_nocursor = _ld_source({_ld_base: _ld_page(json.loads(_ld_first)["entries"], True)})
+    # The count matters too: carrying on without a cursor re-reads page 1 until
+    # max_pages, which also ends in a gap.
+    _ld_nocursor_n = len(_ld_nocursor.fetch())
+    check("has_more without a cursor stops at once and is reported as a gap",
+          _ld_nocursor_n == 2 and _ld_nocursor.coverage() is not None,
+          f"{_ld_nocursor_n} events, coverage {_ld_nocursor.coverage()}")
+    try:
+        _ld_source({}).fetch()
+        check("a failed first page raises", False, "returned normally, which is a silent zero")
+    except Exception:
+        check("a failed first page raises", True)
+    try:
+        _ld_source({_ld_base: json.dumps({"has_more": False})}).fetch()
+        check("a response without entries raises instead of reading as empty",
+              False, "returned normally, which is a silent zero")
+    except ValueError:
+        check("a response without entries raises instead of reading as empty", True)
+    try:
+        _ld_source(_ld_pages).coverage()
+        check("coverage() before fetch() raises", False)
+    except RuntimeError:
+        check("coverage() before fetch() raises", True)
+    try:
+        LumaDiscoverSource("ld", "", 0.0, 0.0, StubHttpClient({}))
+        check("an entry without a category is refused when built", False)
+    except ValueError:
+        check("an entry without a category is refused when built", True)
+
     section("geo.GeoFilter - single-arg, satisfies EventFilter")
     geo = GeoFilter(("san jose", "san francisco"),
                     accept_virtual=True,
@@ -3423,6 +3555,11 @@ def offline() -> None:
           ef_kept.start == "2026-10-05T01:00:00-07:00"
           and ef_kept.end == "2026-10-07T10:00:00-07:00",
           f"start={ef_kept.start!r} end={ef_kept.end!r}")
+    ld_kept = _extract_located(_prose_page, "luma_discover", _MidnightReader())
+    check("a Luma discover start survives the same run, since it is Luma's own instant",
+          ld_kept.start == "2026-10-05T01:00:00-07:00"
+          and ld_kept.end == "2026-10-07T10:00:00-07:00",
+          f"start={ld_kept.start!r} end={ld_kept.end!r}")
     typed_kept = _extract_located(
         _ld("https://luma.com/x", start="2026-10-05T00:00:00-07:00"), "jsonld",
         _Refuser())
@@ -4018,7 +4155,6 @@ JSONLD_SOURCES = [
     ("neu-bayarea-student-life", "https://studentlife.bayarea.northeastern.edu/events/", 5, True),
     ("cerebral-valley-events", "https://cerebralvalley.ai/events", 5, True),
     ("luma-sf", "https://luma.com/sf", 5, True),
-    ("luma-discover-sf-ai", "https://luma.com/discover/sf/ai", 5, True),
     ("luma-ai-sf", "https://luma.com/ai-sf", 5, True),
     # Eventbrite is judged on category, not volume: typically only one or two of
     # its listings survive the geo filter, but they are career fairs, which no
@@ -4130,6 +4266,22 @@ def live() -> None:
         print(f"         {len(events)} events")
     except Exception:
         check("astrazeneca endpoint fetched", False, traceback.format_exc(limit=2))
+
+    section("Luma discover source - the API behind the 25 the page renders")
+    try:
+        lds = LumaDiscoverSource("luma-discover-sf-ai", "ai", 37.7749, -122.4194, http)
+        events = lds.fetch()
+        check("it reads past the 25 events the discover page renders", len(events) > 25,
+              f"got {len(events)} - the endpoint or its paging may have changed")
+        check("every event carries a start", all(e.has_known_start for e in events),
+              f"{sum(not e.has_known_start for e in events)} without one")
+        check("every event keeps its own URL", len({e.url for e in events}) == len(events),
+              "two entries share a URL")
+        warn("every event names a location", all(e.location for e in events),
+             f"{sum(not e.location for e in events)} without one go to the extractor")
+        print(f"         {len(events)} events, coverage {lds.coverage()}")
+    except Exception:
+        check("luma discover endpoint fetched", False, traceback.format_exc(limit=2))
 
 
 def main() -> int:

@@ -27,11 +27,12 @@ A run with nothing new and no last-call reminder due sends no mail at all. That 
 
 ## Sources
 
-Five adapters cover every channel, so adding a site is usually a config entry rather than code.
+Six adapters cover every channel, so adding a site is usually a config entry rather than code.
 
 - `jsonld` reads schema.org `Event` markup. Dates arrive as typed fields, which removes the largest correctness risk in the project, namely a model guessing a date or a timezone.
 - `wordpress_rest` reads a site's `/wp-json` event post type.
 - `eightfold` reads an employer's recruiting events from its Eightfold events page, through the JSON list that page loads, so another employer on Eightfold is one more entry.
+- `luma_discover` reads a Luma discover listing through the API its page scrolls with. The page itself renders only the next 25 events, so the adapter keeps paging until it is a set number of days ahead.
 - `newsletter` reads a beehiiv publication's public archive and harvests the event links out of each issue.
 - `gmail_label` reads one Gmail label over IMAP with an app password. It opens All Mail read-only and searches it for the label, issues no command that changes the mailbox, and fetches bodies with `BODY.PEEK`, so nothing is marked as read. A Gmail rule decides what lands in the label, which means a new newsletter needs no code change at all.
 
@@ -68,9 +69,9 @@ Note that `--dry-run` is not read-only. It records every event it saw, but withh
 
 Nothing is required to get a first result. Without credentials the digest prints to the console instead of being mailed, and says so in its first lines.
 
-## Scheduled daily run
+## Scheduled run
 
-A Claude Code scheduled task, `event-scout-daily-run`, does the local run every day at 3 PM and checks its output. Its rules are in `SCHEDULED_RUN.md`, which the run reads afresh every time, so an edit there takes effect on the next run with no further step.
+A Claude Code scheduled task, `event-scout-daily-run`, does the local run and checks its output. Its rules are in `SCHEDULED_RUN.md`, which the run reads afresh every time, so an edit there takes effect on the next run with no further step.
 
 The app reads the task's prompt from `~/.claude/scheduled-tasks/event-scout-daily-run/SKILL.md`, which lies outside this repo and has no history. That prompt is only a stub pointing at `SCHEDULED_RUN.md`, and its source is `Scheduled_Tasks/event-scout-daily-run.md`. After editing the source, copy it into place with the deploy tool from the Daily_Task repo, which also appends the paragraph that sets the reply language. Run it from this repo's root, with Daily_Task checked out beside this repo.
 

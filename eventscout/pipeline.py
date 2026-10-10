@@ -51,8 +51,8 @@ class AllSourcesFailedError(RuntimeError):
     """Every configured source raised during this run's fetch.
 
     Its own type rather than a bare RuntimeError, because run() also reaches
-    five unrelated RuntimeErrors: EmailNotifier.send's credential check and the
-    four sources' coverage()-before-fetch invariant. A caller catching the
+    six unrelated RuntimeErrors: EmailNotifier.send's credential check and the
+    five sources' coverage()-before-fetch invariant. A caller catching the
     base class would label any of those "no usable source" and send whoever is
     on call looking for a network outage instead of a config or ordering bug.
     """

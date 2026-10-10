@@ -185,7 +185,10 @@ unknown_time_max_urgency: "P1"
 # as a labelled newsletter and as JSON-LD from cerebralvalley.ai/events. On a
 # collision prefer the structured record: its dates are typed rather than parsed
 # out of prose, which is the largest correctness risk in the whole pipeline.
-source_precedence: ["jsonld", "wordpress_rest", "eightfold", "newsletter", "gmail_label"]
+# luma_discover leads because its address names the city, where a Luma
+# calendar's JSON-LD often names only a venue the geo filter cannot place, and
+# an empty field on the winner is still filled from the losing copy.
+source_precedence: ["luma_discover", "jsonld", "wordpress_rest", "eightfold", "newsletter", "gmail_label"]
 
 # --- Run behaviour ---------------------------------------------------------
 # What the very first run does with a backlog nothing has reported yet.

@@ -88,7 +88,8 @@ _PROSE_KINDS = frozenset({"newsletter", "gmail_label"})
 # Tiers whose start comes from a typed startDate, so extraction never replaces it.
 # eightfold's is an epoch timestamp from its JSON list, while its own event page
 # is a script-rendered shell whose prose a model could only misdate.
-_TYPED_START_KINDS = frozenset({"jsonld", "eightfold"})
+# luma_discover's is an ISO instant from Luma's own API.
+_TYPED_START_KINDS = frozenset({"jsonld", "eightfold", "luma_discover"})
 
 
 class PageFactExtractor:

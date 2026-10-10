@@ -13,6 +13,7 @@ from .http import HostRateLimiter, HttpClient, UrllibHttpClient
 from .sources.eightfold import EightfoldSource
 from .sources.gmail_label import GmailLabelSource
 from .sources.jsonld import JsonLdSource
+from .sources.luma_discover import LumaDiscoverSource
 from .sources.newsletter import NewsletterArchiveSource
 from .sources.wordpress import WordPressSource
 
@@ -210,7 +211,7 @@ def _build_gmail_sources(entry: dict, user: str, password: str,
                          skip_from: str) -> list[EventSource]:
     """One mailbox source per label, or none with a reason on stdout.
 
-    Split out of build_sources so that function stays five parallel blocks of
+    Split out of build_sources so that function stays six parallel blocks of
     one test and one append. Skipping is right here, but silently skipping is
     not: an unset credential otherwise looks like a quiet mailbox. The two
     causes are named apart because the fix differs, one being a missing secret
@@ -242,7 +243,7 @@ def build_sources(channels: dict, http: HttpClient,
     """Instantiate every ACTIVE source. Entries whose status is held or deferred
     are skipped here rather than filtered later, so a held source costs nothing.
 
-    The status test is exact for that reason. Three of these four blocks used to
+    The status test is exact for that reason. Three of the four blocks it once read used to
     accept any status STARTING WITH "verified", which would have quietly enabled
     a verified_but_held or verified_pattern entry the moment one was filed under
     a block build_sources reads.
@@ -267,6 +268,12 @@ def build_sources(channels: dict, http: HttpClient,
     for entry in channels.get("eightfold") or []:
         if entry.get("status") == "verified" and entry.get("url"):
             sources.append(EightfoldSource(entry["name"], entry["url"], http))
+    for entry in channels.get("luma_discover") or []:
+        if entry.get("status") == "verified" and entry.get("category"):
+            sources.append(LumaDiscoverSource(
+                entry["name"], entry["category"],
+                float(entry["latitude"]), float(entry["longitude"]), http,
+                days_ahead=int(entry.get("days_ahead", 21))))
     for entry in channels.get("gmail") or []:
         if entry.get("status") == "verified":
             sources += _build_gmail_sources(
