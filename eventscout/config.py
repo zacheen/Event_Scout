@@ -265,9 +265,13 @@ def build_sources(channels: dict, http: HttpClient,
     for entry in channels.get("wordpress") or []:
         if entry.get("status") == "verified" and entry.get("url"):
             sources.append(WordPressSource(entry["name"], entry["url"], http))
+    # Passed through uncoerced, so EightfoldSource still sees a bare string as
+    # YAML gave it and can refuse it.
+    phrases = channels.get("eightfold_registration_phrases") or ()
     for entry in channels.get("eightfold") or []:
         if entry.get("status") == "verified" and entry.get("url"):
-            sources.append(EightfoldSource(entry["name"], entry["url"], http))
+            sources.append(EightfoldSource(entry["name"], entry["url"], http,
+                                           registration_phrases=phrases))
     for entry in channels.get("luma_discover") or []:
         if entry.get("status") == "verified" and entry.get("category"):
             sources.append(LumaDiscoverSource(

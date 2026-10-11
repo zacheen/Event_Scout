@@ -31,7 +31,7 @@ Six adapters cover every channel, so adding a site is usually a config entry rat
 
 - `jsonld` reads schema.org `Event` markup. Dates arrive as typed fields, which removes the largest correctness risk in the project, namely a model guessing a date or a timezone.
 - `wordpress_rest` reads a site's `/wp-json` event post type.
-- `eightfold` reads an employer's recruiting events from its Eightfold events page, through the JSON list that page loads, so another employer on Eightfold is one more entry.
+- `eightfold` reads an employer's recruiting events from its Eightfold events page, through the JSON list that page loads, so another employer on Eightfold is one more entry. An entry open at least 30 days whose title names a registration, from the `eightfold_registration_phrases` list in `channels.yaml`, is read as an online registration that stays in scope until it closes.
 - `luma_discover` reads a Luma discover listing through the API its page scrolls with. The page itself renders only the next 25 events, so the adapter keeps paging until it is a set number of days ahead.
 - `newsletter` reads a beehiiv publication's public archive and harvests the event links out of each issue.
 - `gmail_label` reads one Gmail label over IMAP with an app password. It opens All Mail read-only and searches it for the label, issues no command that changes the mailbox, and fetches bodies with `BODY.PEEK`, so nothing is marked as read. A Gmail rule decides what lands in the label, which means a new newsletter needs no code change at all.

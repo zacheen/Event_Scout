@@ -863,7 +863,7 @@ def offline() -> None:
           changed != len(keep), f"{changed} of {len(keep)} offered")
 
     section("pipeline - a full event is recorded but never mailed")
-    # TODO 1 end to end. The unit tests above cover _at_capacity, but the
+    # Capacity withholding end to end. The unit tests above cover _at_capacity, but the
     # wiring is what decides whether a full event reaches the digest, and it is
     # one list comprehension away from every one of them.
     class _FullPair:
@@ -1184,7 +1184,8 @@ def offline() -> None:
         [("S", [(_allday, Score(fit=5, access_value=5, cost=2), Urgency.P2)])],
         _pac, now=datetime(2026, 9, 1, tzinfo=timezone.utc))
     check("the digest prints the day and refuses to invent a clock time",
-          "2026-10-08 (all day)" in _shown_allday and "00:00" not in _shown_allday,
+          "2026-10-08 (all day)" in _shown_allday and "00:00" not in _shown_allday
+          and "2026-10-08 to" not in _shown_allday,
           f"line: {[l for l in _shown_allday.splitlines() if 'when:' in l]}")
     # RFC 5545 3.6.1: a DATE value, and DTEND is exclusive, so a one-day event
     # ends on the following date. Emitting the stored instants would put a
@@ -2309,7 +2310,7 @@ def offline() -> None:
             db.close()
             local_run.DB = real_db
 
-    section("newsletter.start_from_prose - TODO 2, the only route to a Tesla date")
+    section("newsletter.start_from_prose - the only route to a Tesla date")
     # Every tesla.com/event page answers 403 to this scraper, re-measured
     # 2026-09-19, and the four of five that have since closed no longer print
     # their date even to a real browser. The issue still carries all five, so
@@ -2377,7 +2378,7 @@ def offline() -> None:
           tails("see https://luma.com/three for details") == {},
           str(tails("see https://luma.com/three for details")))
 
-    section("pipeline._at_capacity - TODO 1, a full event is not worth a slot")
+    section("pipeline._at_capacity - a full event is not worth a slot")
     # Against the REAL config, not a fixture list. The markers are data now, so
     # a test carrying its own copy would pass while config.yaml said otherwise.
     _live = load_settings()
@@ -2551,7 +2552,7 @@ def offline() -> None:
         check("every verified channels.yaml entry constructs offline", False,
               traceback.format_exc(limit=2))
 
-    # TODO item 4's fix is two call sites away from the code that enforces it,
+    # Pending_fix.md #4's fix is two call sites away from the code that enforces it,
     # and mutating either one leaves every behavioural test in the mailbox
     # section green: they construct GmailLabelSource directly and so never go
     # through config at all. Checked structurally for that reason, over the same
@@ -2569,7 +2570,7 @@ def offline() -> None:
     for callee, why in [
             ("GmailLabelSource",
              "build_sources would build a mailbox source that reads our own "
-             "digest back, which is TODO item 4"),
+             "digest back, which is Pending_fix.md #4"),
             ("build_sources",
              "build_runtime would leave skip_from at its empty default, so the "
              "check would be off for every real run while staying on in tests")]:
@@ -3137,6 +3138,94 @@ def offline() -> None:
               f"answered {_ef_bad.coverage()!r}")
     except RuntimeError:
         check("a fetch that raised mid-mapping leaves coverage() unanswerable", True)
+
+    # Built through build_sources, so the phrase list reaching the adapter is
+    # tested too. 1798772400 is 2026-12-31 22:00 in New York and already
+    # 2027-01-01 in UTC, which tells the employer's date from the UTC one.
+    _reg_close = 1798772400
+    _reg_pages = {_ef_page + "1": json.dumps({"totalEventsCount": 8, "plannedEventList": [
+        _ef_item("r", name="Acme 2026-2027 Early Career Opportunities",
+                 startTimestamp=1770818400, endTimestamp=_reg_close,
+                 selectedTimezone="America/New_York", venue="Acme HQ",
+                 completeVenue="1 Main St, Gaithersburg, MD, USA"),
+        _ef_item("c", name="Acme at the SHPE Convention",
+                 startTimestamp=1761742800, endTimestamp=1793278800,
+                 selectedTimezone="America/New_York",
+                 venue="Pennsylvania Convention Center", completeVenue="Philadelphia, PA"),
+        _ef_item("s", name="Acme Early Careers | 2027 Internship Overview",
+                 eventLocationType="virtual_event", selectedTimezone="America/New_York"),
+        _ef_item("u", name="Acme Talent Community", startTimestamp=1770818400,
+                 endTimestamp=_reg_close, selectedTimezone="Not/AZone"),
+        _ef_item("v", name="Acme Talent Community", startTimestamp=1770818400,
+                 endTimestamp=_reg_close, selectedTimezone=None),
+        _ef_item("w", name="Acme Talent Community", endTimestamp=None),
+        _ef_item("x30", name="Acme Talent Community", startTimestamp=1770818400,
+                 endTimestamp=1770818400 + 30 * 86400),
+        _ef_item("x29", name="Acme Talent Community", startTimestamp=1770818400,
+                 endTimestamp=1770818400 + 30 * 86400 - 1)]})}
+    _reg_src = build_sources(
+        {"eightfold": [{"name": "ef", "url": _ef_url, "status": "verified"}],
+         "eightfold_registration_phrases": ["Early Career", "talent community"]},
+        StubHttpClient(_reg_pages))[0]
+    _reg = {e.url.rsplit("=", 1)[-1]: e for e in _reg_src.fetch()}
+    check("a long entry whose title names a registration spans its days in the "
+          "employer's zone",
+          (_reg["r"].start, _reg["r"].end) == ("2026-02-11", "2026-12-31"),
+          f"start {_reg['r'].start!r}, end {_reg['r'].end!r}")
+    check("and closes at its exact end, as the deadline urgency and the last call read",
+          _reg["r"].rsvp_deadline == "2027-01-01T03:00:00+00:00",
+          f"rsvp_deadline {_reg['r'].rsvp_deadline!r}")
+    check("and is read as online, keeping the venue it was listed at",
+          _reg["r"].attendance_mode is AttendanceMode.ONLINE
+          and _reg["r"].location
+          == "Online registration, listed at Acme HQ, 1 Main St, Gaithersburg, MD, USA",
+          f"{_reg['r'].attendance_mode!r} at {_reg['r'].location!r}")
+    _reg_zone = display_zone("America/Los_Angeles")
+    _reg_stamped = _stamp_naive(_reg["r"], _reg_zone)
+    _reg_now = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    check("so the geo filter and the date window both keep it while it is open",
+          build_geo(load_channels()).keep(_reg_stamped)
+          and _bound_reason(_reg_stamped, _reg_now, _reg_now + timedelta(days=120)) is None,
+          f"geo {build_geo(load_channels()).keep(_reg_stamped)}, window "
+          f"{_bound_reason(_reg_stamped, _reg_now, _reg_now + timedelta(days=120))}")
+    _reg_after = datetime(2027, 1, 2, 12, tzinfo=timezone.utc)
+    check("and the date window drops it once its last day is over",
+          _bound_reason(_reg_stamped, _reg_after, _reg_after + timedelta(days=120))
+          is not None)
+    check("and the digest shows the day it closes, not only the day it opened",
+          "2026-02-11 to 2026-12-31 (all day)" in format_digest(
+              [("S", [(_reg_stamped, Score(fit=5, access_value=5, cost=2), Urgency.P2)])],
+              _reg_zone, now=_reg_now))
+    check("a long entry naming no registration, such as a conference booth, stays timed",
+          _reg["c"].start == "2025-10-29T13:00:00+00:00" and not _reg["c"].rsvp_deadline
+          and _reg["c"].attendance_mode is AttendanceMode.OFFLINE,
+          f"start {_reg['c'].start!r}, mode {_reg['c'].attendance_mode!r}")
+    check("a short session naming the phrase stays a timed event",
+          _reg["s"].start == "2026-10-15T23:00:00+00:00" and not _reg["s"].rsvp_deadline
+          and _reg["s"].location == "Online",
+          f"start {_reg['s'].start!r}, location {_reg['s'].location!r}")
+    check("an unknown selectedTimezone falls back to the UTC date",
+          _reg["u"].end == "2027-01-01", f"end {_reg['u'].end!r}")
+    # ZoneInfo("") raises ValueError rather than ZoneInfoNotFoundError, so a
+    # missing zone takes a different branch from an unknown one.
+    check("and so does a missing one, rather than failing the employer",
+          _reg["v"].end == "2027-01-01", f"end {_reg['v'].end!r}")
+    check("a registration listed at no venue reads as plain online registration",
+          _reg["u"].location == "Online registration", f"location {_reg['u'].location!r}")
+    check("a phrase on an entry with no end stays a timed event",
+          _reg["w"].start == "2026-10-15T23:00:00+00:00" and not _reg["w"].rsvp_deadline,
+          f"start {_reg['w'].start!r}, rsvp_deadline {_reg['w'].rsvp_deadline!r}")
+    check("exactly 30 days is a registration and a second less is not",
+          bool(_reg["x30"].rsvp_deadline) and not _reg["x29"].rsvp_deadline,
+          f"x30 {_reg['x30'].rsvp_deadline!r}, x29 {_reg['x29'].rsvp_deadline!r}")
+    for _bad_phrases, _err in (("early career", TypeError), (["early career", " "], ValueError)):
+        try:
+            EightfoldSource("ef", _ef_url, StubHttpClient({}),
+                            registration_phrases=_bad_phrases)
+            check(f"registration_phrases {_bad_phrases!r} is refused", False,
+                  "accepted, so every long entry would read as a registration")
+        except _err:
+            check(f"registration_phrases {_bad_phrases!r} is refused", True)
 
     try:
         EightfoldSource("ef", _ef_url, StubHttpClient({
@@ -4005,7 +4094,7 @@ def offline() -> None:
     finally:
         _imaplib.IMAP4_SSL = _real
 
-    # TODO item 4. The digest this project mails is delivered to an address it
+    # Pending_fix.md #4. The digest this project mails is delivered to an address it
     # also reads, so without skip_from every link it printed comes back as an
     # Event whose description is the whole digest.
     _own = (b"Subject: [Event Scout] 53 events (6 closing soon)\r\n"
@@ -4309,8 +4398,12 @@ def live() -> None:
             check("the harvested item carries the issue's publish date, so "
                   "first_run.require_known_publish_time will not drop it",
                   bool(hit[0].published_at), "published_at is empty")
-            warn("its start is empty, as expected for prose (the LLM extractor fills it)",
-                 not hit[0].start, f"unexpectedly got start={hit[0].start!r}")
+            # tesla.com answered this scraper 403, re-measured 2026-09-19, so the
+            # issue's own prose, "Monday, August 31 at 5:30pm EST", is the only
+            # source of a date.
+            check("its start is read from the issue's prose",
+                  hit[0].start == "2026-08-31T17:30:00-05:00",
+                  f"got start={hit[0].start!r}")
     except Exception:
         check("backtest ran", False, traceback.format_exc(limit=2))
 

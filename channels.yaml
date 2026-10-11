@@ -10,6 +10,8 @@
 #   jsonld:       name; url; status
 #   wordpress:    name; url; status
 #   eightfold:    name; url (must keep its ?domain=); status
+#                 plus the top-level eightfold_registration_phrases list, which
+#                 build_sources hands to every eightfold entry
 #   luma_discover: name; category; latitude; longitude; status; days_ahead (default 30)
 #   gmail:        status; newer_than_days; max_messages  (mailbox and labels come from .env)
 #   newsletters:  name; host; status; archive_path (default /archive)
@@ -444,11 +446,75 @@ eightfold:
     adapter: eightfold
     url: https://astrazeneca.eightfold.ai/events/open?domain=astrazeneca.com
     status: verified
-    # Probed 2026-10-09, 8 events on one page, none of them in the Bay Area.
-    # Two are "Early Career Opportunities" registrations open from 2026-02-11
-    # to 2026-12-31 and listed at the Gaithersburg, MD site, so the date
-    # window drops them as already started and the geo filter drops them as
-    # out of region, although registering is done online from anywhere.
+    # Probed 2026-10-10, 8 events on one page, none of them in the Bay Area.
+    # Its two "Early Career Opportunities" and "2027 Summer Internship
+    # Recruiting" are the registrations eightfold_registration_phrases exists
+    # for, and the only events of this tenant that pass, meaning the geo
+    # filter and the date window both keep them, as "passing" means below.
+
+  - name: appliedmaterials-eightfold
+    adapter: eightfold
+    url: https://appliedmaterials.eightfold.ai/events/open?domain=appliedmaterials.com
+    status: verified
+    # Probed 2026-10-10, 26 events, 2 passing, SEMICON West at Moscone and a
+    # recruiting event at SJSU. Most of the rest are year-long registration
+    # pages for single East Coast campuses, titled by the school alone, so no
+    # phrase marks them. "Applied Materials at Northeastern University" is one.
+
+  - name: qualcomm-eightfold
+    adapter: eightfold
+    url: https://qualcomm.eightfold.ai/events/open?domain=qualcomm.com
+    status: verified
+    # Probed 2026-10-10, 20 events on 2 pages, 2 passing, a Summer 2027 intern
+    # virtual info session and a PhD-only internship interest form read as a
+    # registration. Most others are campus visits outside the Bay Area.
+
+  - name: micron-eightfold
+    adapter: eightfold
+    url: https://micron.eightfold.ai/events/open?domain=micron.com
+    status: verified
+    # Probed 2026-10-10, 41 events on 5 pages, 2 passing, an online careers
+    # talk and the Singapore talent community read as a registration. Most of
+    # the rest are campus events in Singapore and Malaysia.
+
+  - name: lamresearch-eightfold
+    adapter: eightfold
+    url: https://lamresearch.eightfold.ai/events/open?domain=lamresearch.com
+    status: verified
+    # Probed 2026-10-10, 12 events, none passing, campus career fairs and
+    # conferences outside the Bay Area or already started.
+
+  - name: activision-eightfold
+    adapter: eightfold
+    url: https://activision.eightfold.ai/events/open?domain=activision.com
+    status: verified
+    # Probed 2026-10-10, 8 events, 7 passing, three online Early Careers
+    # sessions that stay timed events and four talent communities or pools
+    # read as registrations.
+
+  - name: capitalone-eightfold
+    adapter: eightfold
+    url: https://capitalone.eightfold.ai/events/open?domain=capitalone.com
+    status: verified
+    # Probed 2026-10-10, 18 events, 10 passing, all online, student case
+    # workshops and product open houses beside veteran and military hiring
+    # events.
+
+# A title holding one of these, on an entry open at least 30 days, marks a
+# registration that stays open rather than an event that happens. Such an
+# entry is read as online and all day until it closes, with the close as its
+# deadline (see _is_registration and _registration_fields in
+# eventscout/sources/eightfold.py). Matched lowercased as a
+# substring of the title only. Matching the description too was measured on
+# 2026-10-10 and would have added 13 entries, 11 of them Applied Materials
+# booths at other schools' campuses. Keep each phrase one that states a
+# registration, since a long window alone also describes a conference booth.
+eightfold_registration_phrases:
+  - early career
+  - talent community
+  - talent pool
+  - internship recruiting
+  - express interest
 
 # ---------------------------------------------------------------------------
 # TIER A1e - Luma discover listings, read through the API the page pages with.

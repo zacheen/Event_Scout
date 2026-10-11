@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import datetime, timedelta, timezone
 from typing import ClassVar
 from urllib.parse import parse_qs, urlencode, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..http import HttpClient
-from ..models import AttendanceMode, Coverage, Event, iso_or_empty
+from ..models import AttendanceMode, Coverage, Event, iso_or_empty, parse_iso
 from ..urls import canon_url
 from ._text import strip_html
 
@@ -34,11 +36,27 @@ _DESCRIPTION_MAX = 2000
 # rather than reaching fromtimestamp's unnamed OSError or ValueError.
 _EPOCH_CEILING = 4_102_444_800
 
+# An entry open at least this long whose title names a registration is a form
+# that stays open, not an event that happens. On the seven tenants probed,
+# every title naming one ran 82 days or more, while Activision's one-hour
+# "ABK Early Careers" info sessions name the phrase and stay timed events.
+_REGISTRATION_MIN_DAYS = 30
+
 
 class EightfoldSource:
     kind: ClassVar[str] = "eightfold"
 
-    def __init__(self, name: str, url: str, http: HttpClient, max_pages: int = 20):
+    def __init__(self, name: str, url: str, http: HttpClient, max_pages: int = 20,
+                 registration_phrases: Sequence[str] = ()):
+        # A bare string would iterate into one-letter phrases, and a blank one
+        # is a substring of every title, so either would mark every long entry
+        # a registration. Neither raises on its own.
+        if isinstance(registration_phrases, str):
+            raise TypeError(f"{name}: registration_phrases must be a list of phrases, "
+                            "not one string")
+        if not all(isinstance(p, str) and p.strip() for p in registration_phrases):
+            raise ValueError(f"{name}: registration_phrases holds a blank or non-string entry")
+        self._registration_phrases = tuple(p.strip().lower() for p in registration_phrases)
         parts = urlsplit(url)
         domain = (parse_qs(parts.query).get("domain") or [""])[0].strip()
         # Refused here, not at fetch: the list endpoint answers HTTP 401
@@ -108,29 +126,34 @@ class EightfoldSource:
             return None
         mode = _MODE_BY_TYPE.get(str(item.get("eventLocationType") or ""),
                                  AttendanceMode.UNKNOWN)
-        # A virtual event names no venue, and a blank location sends the event
-        # to PageFactExtractor, which would fetch the script-rendered page to
-        # learn what eventLocationType already says.
-        location = self._location(item) or ("Online" if mode is AttendanceMode.ONLINE else "")
+        start = self._iso(item, "startTimestamp")
+        end = self._iso(item, "endTimestamp")
+        venue = self._location(item)
+        when_where = {
+            "start": start, "end": end, "rsvp_deadline": "", "attendance_mode": mode,
+            # A virtual event names no venue, and a blank location sends the
+            # event to PageFactExtractor, which would fetch the script-rendered
+            # page to learn what eventLocationType already says.
+            "location": venue or ("Online" if mode is AttendanceMode.ONLINE else ""),
+        }
+        if self._is_registration(title, start, end):
+            when_where.update(self._registration_fields(item, start, end, venue))
         return Event(
             event_uid=f"{self.kind}:{url}",
             title=title,
             url=url,
             source=self.name,
             source_kind=self.kind,
-            start=self._iso(item, "startTimestamp"),
-            end=self._iso(item, "endTimestamp"),
             # No employer name field exists, and the scorer's access_value asks
             # which employer the event leads to. Many titles never say, such as
             # Lam Research's "2026 Stanford University Career Fair Fall (US)",
             # so the domain from the configured URL stands in for it.
             organizer=self._domain,
-            location=location,
-            attendance_mode=mode,
             description=strip_html(str(item.get("description") or ""))[:_DESCRIPTION_MAX],
             # publishJson carries publish timestamps, all null on every event
             # probed, so there is nothing to report.
             published_at="",
+            **when_where,
         )
 
     def _iso(self, item: dict, key: str) -> str:
@@ -147,6 +170,44 @@ class EightfoldSource:
                 or not 0 < value < _EPOCH_CEILING):
             raise ValueError(f"{self.name}: {key} {value!r} is not epoch seconds")
         return iso_or_empty(datetime.fromtimestamp(value, timezone.utc).isoformat())
+
+    def _is_registration(self, title: str, start: str, end: str) -> bool:
+        if not (start and end and self._registration_phrases):
+            return False
+        lowered = title.lower()
+        return (parse_iso(end) - parse_iso(start) >= timedelta(days=_REGISTRATION_MIN_DAYS)
+                and any(p in lowered for p in self._registration_phrases))
+
+    @classmethod
+    def _registration_fields(cls, item: dict, start: str, end: str, venue: str) -> dict:
+        """The when and where of an open registration, replacing the timed ones.
+
+        Read timed, AstraZeneca's "Early Career Opportunities" opened on
+        2026-02-11 and is listed at its Gaithersburg, MD site, so the date
+        window dropped it as started and the geo filter as out of region,
+        though anyone can register online until 2026-12-31. Bare dates make it
+        all day, which keeps it until its last day, the close becomes the
+        deadline that urgency and the last call read, and the location says
+        online so accept_virtual decides it.
+        """
+        zone = cls._zone(item)
+        return {
+            "start": parse_iso(start).astimezone(zone).date().isoformat(),
+            "end": parse_iso(end).astimezone(zone).date().isoformat(),
+            "rsvp_deadline": end,
+            "attendance_mode": AttendanceMode.ONLINE,
+            "location": (f"Online registration, listed at {venue}" if venue
+                         else "Online registration"),
+        }
+
+    @staticmethod
+    def _zone(item: dict) -> ZoneInfo | timezone:
+        """The zone the employer stated the window in, so a bare date is the
+        day its own page shows, or UTC when it names none that resolves."""
+        try:
+            return ZoneInfo(str(item.get("selectedTimezone") or ""))
+        except (ZoneInfoNotFoundError, ValueError):
+            return timezone.utc
 
     @staticmethod
     def _location(item: dict) -> str:

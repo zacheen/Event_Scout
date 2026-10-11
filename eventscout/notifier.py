@@ -137,7 +137,14 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
             if start is None:
                 when = "date unknown"
             elif event.all_day:
-                when = f"{start.astimezone(zone).strftime('%Y-%m-%d')} (all day)"
+                # An Eightfold registration runs for months, and its first day
+                # alone read as an event that started in February rather than
+                # one open until December.
+                first = start.astimezone(zone).strftime("%Y-%m-%d")
+                last = (parse_iso(event.end).astimezone(zone).strftime("%Y-%m-%d")
+                        if event.end else first)
+                when = (f"{first} (all day)" if last == first
+                        else f"{first} to {last} (all day)")
             else:
                 when = start.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
             if lead:
