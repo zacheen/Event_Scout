@@ -40,6 +40,7 @@ class Settings:
     keyword_gate_applies_to: list[str] = field(default_factory=list)
     keyword_match_prefix_chars: int = 2000
     lookahead_days: int = 30
+    long_running_days: int = 30
     urgent_hours: int = 72
     resweep_min_gap_hours: int = 24
     digest_min_rank: int = 10
@@ -82,6 +83,14 @@ def load_settings(config_path: Path | None = None) -> Settings:
     raw = yaml.safe_load((config_path or ROOT / "config.yaml").read_text(encoding="utf-8"))
     first = raw.get("first_run") or {}
     _check_policies(raw, first)
+    long_running_days = int(raw.get("long_running_days", 30))
+    # 0 reads as "off" and does the opposite: every event with a stated end
+    # skips the geo filter and a started one stays while its end is ahead. A
+    # negative value makes SQLite's datetime() return NULL, so expire_past
+    # never retires a row with an end. Neither raises on its own.
+    if long_running_days < 1:
+        raise ValueError(f"config.yaml long_running_days={long_running_days} must be at "
+                         "least 1; a large value such as 3650 switches the rule off")
     return Settings(
         keywords=[str(k).lower() for k in raw.get("keywords") or []],
         # Lowercased on load like keywords, so the comparison site does not
@@ -91,6 +100,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
         keyword_gate_applies_to=list(raw.get("keyword_gate_applies_to") or []),
         keyword_match_prefix_chars=int(raw.get("keyword_match_prefix_chars", 2000)),
         lookahead_days=int(raw.get("lookahead_days", 30)),
+        long_running_days=long_running_days,
         urgent_hours=int(raw.get("urgent_section_within_hours", 72)),
         resweep_min_gap_hours=int(raw.get("resweep_min_gap_hours", 24)),
         digest_min_rank=int(raw.get("digest_min_rank", 10)),

@@ -984,6 +984,51 @@ def offline() -> None:
         finally:
             db.close()
 
+    section("pipeline - a listing open a month or more skips the place test")
+    # long_running_days on both stages at once: "open" started before _NOW and
+    # runs to December from a place geo rejects, "boston" must still be dropped.
+    class _Open:
+        kind = name = "jsonld"
+
+        def fetch(self):
+            return [replace(_listing("jsonld", "https://luma.com/open"),
+                            event_uid="jsonld:open", start="2026-09-01T18:00:00-07:00",
+                            end="2026-12-31T18:00:00-08:00", location="Singapore"),
+                    replace(_listing("jsonld", "https://luma.com/boston"),
+                            event_uid="jsonld:boston", location="Boston, MA")]
+
+    with tempfile.TemporaryDirectory() as tmp_open_geo:
+        db = SqliteEventStore(Path(tmp_open_geo) / "open.db")
+        try:
+            # Already in the ledger, started, and ending 12 days after _NOW, so
+            # the expire_past call in run() retires it only when it is passed a
+            # distance of 13 days or more. A distance of 0, run() dropping the
+            # setting, would leave any row with a future end live.
+            db.upsert(_event(event_uid="jsonld:ending", url="https://luma.com/ending",
+                             start="2026-09-01T18:00:00-07:00",
+                             end="2026-10-01T18:00:00-07:00"))
+            _open_box = _Mailbox()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                run([_Open()], db, build_geo(load_channels()), _offline,
+                    _open_box, dry_run=False, now=_NOW)
+            line = next((ln for ln in out.getvalue().splitlines()
+                         if "after geo filter" in ln), "")
+            check("a started listing open for months is mailed from a place geo rejects",
+                  "https://luma.com/open" in _open_box.mailed
+                  and "https://luma.com/boston" not in _open_box.mailed,
+                  f"mailed {_open_box.mailed}")
+            check("and the funnel says it skipped the place test",
+                  "1 kept without a place test" in line, f"line: {line!r}")
+            _open_states = dict(db._conn.execute(
+                "SELECT event_uid, state FROM events").fetchall())
+            check("and run() keeps its ledger row live while retiring one ending sooner",
+                  _open_states.get("jsonld:open") not in (None, "expired")
+                  and _open_states.get("jsonld:ending") == "expired",
+                  f"states {_open_states}")
+        finally:
+            db.close()
+
     section("pipeline._stamp_naive - a stamp with no offset is not UTC")
     # The measured row this exists for: eventbrite-sf-tech-career published
     # "San Francisco Job Fair October 8, 2026" as "2026-10-08T00:00:00". Read
@@ -1053,7 +1098,7 @@ def offline() -> None:
             # while the stamped one is still eleven hours away. A `now` outside
             # that gap passes either way, which an earlier draft of this line
             # did until a mutation showed it surviving.
-            db.expire_past("2026-10-08T03:00:00+00:00", 0)
+            db.expire_past("2026-10-08T03:00:00+00:00", 0, open_days=30)
             state = db._conn.execute(
                 "SELECT state FROM events WHERE event_uid='jsonld:fair'"
             ).fetchone()[0]
@@ -1277,11 +1322,11 @@ def offline() -> None:
             # shifted one is not. A `now` of 19:00 UTC, the obvious "midday",
             # lands the cutoff exactly ON the start and passes either way,
             # which is what a mutation caught.
-            db.expire_past("2026-10-08T23:00:00+00:00", _grace)
+            db.expire_past("2026-10-08T23:00:00+00:00", _grace, open_days=30)
             state = db._conn.execute("SELECT state FROM events").fetchone()[0]
             check("and SQL keeps it alive at midday on the day itself",
                   state != "expired", f"state={state}")
-            db.expire_past("2026-10-09T20:00:00+00:00", _grace)
+            db.expire_past("2026-10-09T20:00:00+00:00", _grace, open_days=30)
             state = db._conn.execute("SELECT state FROM events").fetchone()[0]
             check("while the day after, past the grace, it is over",
                   state == "expired", f"state={state}")
@@ -1297,7 +1342,7 @@ def offline() -> None:
         try:
             db.upsert(_multi)
             def _md_state(now):
-                db.expire_past(now, _grace)
+                db.expire_past(now, _grace, open_days=30)
                 return db._conn.execute("SELECT state FROM events").fetchone()[0]
             check("a three-day event is still live on its second day",
                   _md_state("2026-10-09T23:00:00+00:00") != "expired",
@@ -1312,17 +1357,17 @@ def offline() -> None:
             db.close()
     _day2 = datetime(2026, 10, 9, 23, tzinfo=timezone.utc)
     check("_bound_reason keeps a multi-day event on its second day too",
-          _bound_reason(_multi, _day2, _day2 + timedelta(days=120)) is None,
+          _bound_reason(_multi, _day2, _day2 + timedelta(days=120), still_open=timedelta(days=30)) is None,
           "the date window cut it a day in")
     # Same shift, same instant, same reason, now on the filter side, so the
     # filter and the ledger cannot disagree.
     _pm = datetime(2026, 10, 8, 23, tzinfo=timezone.utc)
     check("_bound_reason keeps an all-day event through its own day",
-          _bound_reason(_allday, _pm, _pm + timedelta(days=120)) is None,
+          _bound_reason(_allday, _pm, _pm + timedelta(days=120), still_open=timedelta(days=30)) is None,
           "the date window cut it while the doors were open")
     check("and a timed event that started 16h ago is still cut",
           _bound_reason(_event(start="2026-10-08T07:00:00+00:00"), _pm,
-                        _pm + timedelta(days=120)) is not None,
+                        _pm + timedelta(days=120), still_open=timedelta(days=30)) is not None,
           "the grace was widened for everything, not just all-day events")
     # A timed event is cut the moment it starts, with or without a stated end,
     # since one digest offered an event six hours after it began.
@@ -1330,17 +1375,121 @@ def offline() -> None:
     _hz = _started_1h + timedelta(days=120)
     check("a timed event that started an hour ago is cut",
           _bound_reason(_event(start="2026-10-08T07:00:00+00:00"),
-                        _started_1h, _hz) == pipeline._STARTED,
+                        _started_1h, _hz, still_open=timedelta(days=30)) == pipeline._STARTED,
           "it was kept though it had already begun")
     check("and so is one whose stated end is still ahead",
           _bound_reason(_event(start="2026-10-08T07:00:00+00:00",
                                end="2026-10-08T10:00:00+00:00"),
-                        _started_1h, _hz) == pipeline._STARTED,
+                        _started_1h, _hz, still_open=timedelta(days=30)) == pipeline._STARTED,
           "a stated end kept a started event in the digest")
     check("while one not yet started is kept",
           _bound_reason(_event(start="2026-10-08T09:00:00+00:00"),
-                        _started_1h, _hz) is None,
+                        _started_1h, _hz, still_open=timedelta(days=30)) is None,
           "an upcoming event was cut")
+    # long_running_days. A listing open since January, such as Applied
+    # Materials' Northeastern registration, against a clock of 2026-10-08 08:00.
+    _open_from = "2026-01-30T13:00:00+00:00"
+    _far_end = _event(start=_open_from, end="2026-11-08T09:00:00+00:00")
+    _near_end = _event(start=_open_from, end="2026-11-06T09:00:00+00:00")
+    check("a started listing whose end is still a month away is kept",
+          _bound_reason(_far_end, _started_1h, _hz,
+                        still_open=timedelta(days=30)) is None,
+          "a year-long listing was cut the day after it opened")
+    check("and cut once its end is closer than that",
+          _bound_reason(_near_end, _started_1h, _hz,
+                        still_open=timedelta(days=30)) == pipeline._STARTED)
+    check("the distance is the one passed in, not a fixed 30 days",
+          _bound_reason(_far_end, _started_1h, _hz,
+                        still_open=timedelta(days=60)) == pipeline._STARTED)
+    with tempfile.TemporaryDirectory() as tmp_open:
+        db = SqliteEventStore(Path(tmp_open) / "open.db")
+        try:
+            for _ev in (replace(_far_end, event_uid="jsonld:https://x/far", url="https://x/far"),
+                        replace(_near_end, event_uid="jsonld:https://x/near", url="https://x/near")):
+                db.upsert(_ev)
+            db.expire_past(_started_1h.isoformat(), 0, open_days=30)
+            _open_states = dict(db._conn.execute(
+                "SELECT event_uid, state FROM events").fetchall())
+            check("expire_past keeps the same listing live, so the ledger agrees",
+                  _open_states["jsonld:https://x/far"] != "expired"
+                  and _open_states["jsonld:https://x/near"] == "expired",
+                  f"states {_open_states}")
+            db.expire_past(_started_1h.isoformat(), 0, open_days=60)
+            check("and reads the distance it is passed too",
+                  db._conn.execute("SELECT state FROM events WHERE event_uid=?",
+                                   ("jsonld:https://x/far",)).fetchone()[0] == "expired")
+        finally:
+            db.close()
+    # One rule stated in Python and in SQL, so the boundary is checked on both
+    # from the same rows, a second either side of an end exactly 30 days away.
+    _par_ends = {"minus": timedelta(days=30, seconds=-1), "exact": timedelta(days=30),
+                 "plus": timedelta(days=30, seconds=1)}
+    with tempfile.TemporaryDirectory() as tmp_par:
+        db = SqliteEventStore(Path(tmp_par) / "par.db")
+        try:
+            _par = {n: _event(event_uid=f"jsonld:https://x/{n}", url=f"https://x/{n}",
+                              start=_open_from, end=(_started_1h + d).isoformat())
+                    for n, d in _par_ends.items()}
+            for _ev in _par.values():
+                db.upsert(_ev)
+            db.expire_past(_started_1h.isoformat(), 0, open_days=30)
+            _par_ledger = dict(db._conn.execute(
+                "SELECT event_uid, state FROM events").fetchall())
+            _par_window = {n: _bound_reason(e, _started_1h, _hz,
+                                            still_open=timedelta(days=30)) is None
+                           for n, e in _par.items()}
+            _par_live = {n: _par_ledger[e.event_uid] != "expired" for n, e in _par.items()}
+            check("the date window and the ledger agree a second either side of 30 days",
+                  _par_window == _par_live == {"minus": False, "exact": False, "plus": True},
+                  f"window {_par_window}, ledger {_par_live}")
+        finally:
+            db.close()
+    _span = timedelta(days=30)
+    check("a window of exactly long_running_days counts as long running",
+          pipeline._runs_at_least(_event(start=_open_from,
+                                         end=(parse_iso(_open_from) + _span).isoformat()),
+                                  _span))
+    try:
+        _endless = pipeline._runs_at_least(_event(end="2026-11-08T09:00:00+00:00"), _span)
+        check("an event with an end but no start is not long running, rather than raising",
+              _endless is False, f"got {_endless!r}")
+    except Exception:
+        check("an event with an end but no start is not long running, rather than raising",
+              False, traceback.format_exc(limit=1))
+    _cfg_text = (Path(__file__).resolve().parent / "config.yaml").read_text(encoding="utf-8")
+    check("config.yaml still sets long_running_days on a line of its own",
+          len(re.findall(r"(?m)^long_running_days: \d+", _cfg_text)) == 1)
+    with tempfile.TemporaryDirectory() as tmp_cfg:
+        for _bad_days in (0, -5):
+            _bad_cfg = Path(tmp_cfg) / f"long_running_{_bad_days}.yaml"
+            _bad_cfg.write_text(re.sub(r"(?m)^long_running_days: \d+",
+                                       f"long_running_days: {_bad_days}", _cfg_text),
+                                encoding="utf-8")
+            try:
+                load_settings(_bad_cfg)
+                check(f"long_running_days {_bad_days} is refused at load", False,
+                      "accepted, which turns the rule inside out rather than off")
+            except ValueError:
+                check(f"long_running_days {_bad_days} is refused at load", True)
+
+    _lr_zone = display_zone("America/Los_Angeles")
+
+    def _when_line(event):
+        text = format_digest([("S", [(event, Score(fit=5, access_value=5, cost=2),
+                                      Urgency.P2)])], _lr_zone, now=_started_1h)
+        return next((ln for ln in text.splitlines() if "when:" in ln), "")
+
+    for _w_label, _w_event, _w_ranged in [
+            ("a long listing under way prints the day it closes",
+             _event(start="2026-01-30T13:00:00+00:00", end="2027-02-01T04:00:00+00:00"),
+             "2026-01-30 05:00 PST to 2027-01-31 20:00 PST"),
+            ("an event not yet started still prints its start alone",
+             _event(start="2026-10-09T01:00:00+00:00", end="2026-10-09T03:00:00+00:00"), ""),
+            ("and so does one whose end has already passed",
+             _event(start="2026-10-08T05:00:00+00:00", end="2026-10-08T07:00:00+00:00"), "")]:
+        _w_line = _when_line(_w_event)
+        check(_w_label, (_w_ranged in _w_line) if _w_ranged else " to " not in _w_line,
+              f"line {_w_line!r}")
 
     section("store.expire_past - the ledger and the digest agree on 'started'")
     # _bound_reason keeps a started event for _START_GRACE and expire_past used
@@ -1355,7 +1504,7 @@ def offline() -> None:
                              start="2026-09-19T20:00:00+00:00"))
             # A literal 12, not _grace. This half proves the store honours
             # whatever grace it is handed, which a grace of 0 cannot show.
-            db.expire_past("2026-09-20T12:00:00+00:00", 12)
+            db.expire_past("2026-09-20T12:00:00+00:00", 12, open_days=30)
             def _state(uid):
                 return db._conn.execute(
                     "SELECT state FROM events WHERE event_uid=?",
@@ -2703,7 +2852,7 @@ def offline() -> None:
             evening = iso_or_empty("2026-09-09T17:30:00.000-07:00")
             db.upsert(_event(event_uid="tz", url="https://x/tz", start=evening))
             db.mark_alerted(["tz"], at="2026-09-01T00:00:00+00:00")
-            db.expire_past(noon_utc, 0)
+            db.expire_past(noon_utc, 0, open_days=30)
             still = db._conn.execute(
                 "SELECT state FROM events WHERE event_uid='tz'").fetchone()[0]
             check("an event six hours away is not expired by string order",
@@ -2729,6 +2878,21 @@ def offline() -> None:
                       datetime.fromisoformat(now)) is Urgency.P0,
                   "the urgency tier no longer reads the deadline, so this "
                   "check has stopped testing the disagreement it was written for")
+            _u_now =datetime(2026, 10, 11, tzinfo=timezone.utc)
+            _u_top = Score(fit=10, access_value=10, cost=1, reason="", method="k")
+            for _u_label, _u_event, _u_want in [
+                    ("a long listing already under way is not P0 for having started",
+                     _event(start="2026-01-30T13:00:00+00:00",
+                            end="2026-12-31T22:00:00+00:00"), Urgency.P1),
+                    ("one not yet started is still measured to its start",
+                     _event(start="2026-10-13T00:00:00+00:00",
+                            end="2026-10-15T04:00:00+00:00"), Urgency.P0),
+                    ("a deadline, even one already past, still decides over the end",
+                     _event(start="2026-01-30T13:00:00+00:00",
+                            end="2026-12-31T22:00:00+00:00",
+                            rsvp_deadline="2026-10-10T00:00:00+00:00"), Urgency.P0)]:
+                _u_got = DeadlineUrgency(72, 40, 9).classify(_u_event, _u_top, _u_now)
+                check(_u_label, _u_got is _u_want, f"got {_u_got}")
             # The other direction: a deadline that has passed must not keep an
             # event sweepable on its start alone. COALESCE picks the deadline,
             # so this row falls out of the window rather than back onto start.
@@ -2784,7 +2948,7 @@ def offline() -> None:
                 uid = f"terminal-{state.value}"
                 db.upsert(_event(event_uid=uid, url=f"https://x/{uid}", start=past))
                 db.set_state(uid, state)
-            db.expire_past(now, 0)
+            db.expire_past(now, 0, open_days=30)
             survived = {s.value for s in State
                         if db._conn.execute(
                             "SELECT state FROM events WHERE event_uid=?",
@@ -3185,12 +3349,12 @@ def offline() -> None:
     _reg_now = datetime(2026, 10, 10, tzinfo=timezone.utc)
     check("so the geo filter and the date window both keep it while it is open",
           build_geo(load_channels()).keep(_reg_stamped)
-          and _bound_reason(_reg_stamped, _reg_now, _reg_now + timedelta(days=120)) is None,
+          and _bound_reason(_reg_stamped, _reg_now, _reg_now + timedelta(days=120), still_open=timedelta(days=30)) is None,
           f"geo {build_geo(load_channels()).keep(_reg_stamped)}, window "
-          f"{_bound_reason(_reg_stamped, _reg_now, _reg_now + timedelta(days=120))}")
+          f"{_bound_reason(_reg_stamped, _reg_now, _reg_now + timedelta(days=120), still_open=timedelta(days=30))}")
     _reg_after = datetime(2027, 1, 2, 12, tzinfo=timezone.utc)
     check("and the date window drops it once its last day is over",
-          _bound_reason(_reg_stamped, _reg_after, _reg_after + timedelta(days=120))
+          _bound_reason(_reg_stamped, _reg_after, _reg_after + timedelta(days=120), still_open=timedelta(days=30))
           is not None)
     check("and the digest shows the day it closes, not only the day it opened",
           "2026-02-11 to 2026-12-31 (all day)" in format_digest(

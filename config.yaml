@@ -133,6 +133,15 @@ display_timezone: "America/Los_Angeles"
 # ceiling. Kept at all only to stop a mistyped year reaching the scorer, and set
 # generously so an event announced months ahead is seen while seats remain.
 lookahead_days: 120
+# A listing open this many days or more gets two exceptions. Once started it
+# stays in scope while its end is more than this far away, and when its stated
+# window spans this long it skips the geo filter. Many such windows are
+# registrations for an in-person event elsewhere, which is accepted, and 30 is
+# a starting point to tune against the digests it produces. Measured 2026-10-11
+# on the seven Eightfold tenants, 68 events passed instead of 26, and most of
+# the 42 added were campus events in Singapore and at other schools. No ledger
+# row from any other source had a window this long.
+long_running_days: 30
 
 # --- Delivery --------------------------------------------------------------
 # At most one email per run, with up to four sections (see notifier.py).

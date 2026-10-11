@@ -147,6 +147,12 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
                         else f"{first} to {last} (all day)")
             else:
                 when = start.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
+                # With no start grace, a timed event shown after its start is
+                # one long_running_days kept, and it gets no last call, so this
+                # line is the only place the reader learns when it closes.
+                end = parse_iso(event.end) if event.end else None
+                if end and start <= now < end:
+                    when = f"{when} to {end.astimezone(zone).strftime('%Y-%m-%d %H:%M %Z')}"
             if lead:
                 when = f"{when} ({lead})"
             where = event.location or ("online" if event.is_virtual else "location unknown")

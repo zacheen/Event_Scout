@@ -14,8 +14,8 @@ One pass runs the following stages, and every stage that filters reports how man
 | URL dedupe | Canonical URLs collapse, with tracking parameters stripped |
 | Extraction | Items missing a date or location get one page fetch. Schema.org markup on the page is read first, and an LLM reads the page only when that markup yields no usable event and a model tier is available. Nothing is dropped here |
 | Event dedupe | Same title plus the same start instant collapses across sources |
-| Geo filter | A location that names a Bay Area city or region passes, and one that names a place elsewhere is dropped. Virtual events pass when `accept_virtual` is on |
-| Horizon | Events already started, or further out than `lookahead_days`, are dropped |
+| Geo filter | A location that names a Bay Area city or region passes, and one that names a place elsewhere is dropped. Virtual events pass when `accept_virtual` is on. A listing whose stated window spans `long_running_days` or more passes wherever it is |
+| Horizon | Events already started, or further out than `lookahead_days`, are dropped. A started listing whose end is still `long_running_days` away is kept |
 | Keyword gate | Mailbox items must contain one term from `config.yaml` |
 | Scoring | Each survivor gets a rank, and everything below the floor is withheld |
 | Sold out | Events whose listing says they are full are withheld |

@@ -527,4 +527,10 @@ class DeadlineUrgency:
         # both the scoring loop and the resweep, so that AttributeError took the
         # whole run down.
         when = parse_iso(stamp) if stamp else None
+        # Once under way, an event with no deadline closes at its end. Measured
+        # to its start, a listing kept in scope for an end a month or more away
+        # would read as closing now, and a rank of 40 would put it in P0.
+        # due_for_resweep still uses the start (Known_concern #3).
+        if when is not None and not event.rsvp_deadline and when < now and event.end:
+            when = parse_iso(event.end) or when
         return None if when is None else (when - now).total_seconds() / 3600

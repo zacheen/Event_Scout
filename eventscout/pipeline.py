@@ -311,8 +311,20 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
         funnel.stage("after title+time dedupe", len(deduped),
                      f"{before - len(deduped)} collapsed onto another listing")
 
-    in_region = [e for e in deduped if geo.keep(e)]
-    funnel.stage("after geo filter", len(in_region))
+    # A window of long_running_days or more is a registration or an open
+    # listing rather than one gathering, so where it is listed does not decide
+    # whether the reader can take part (config.yaml has what this admits).
+    long_running = timedelta(days=settings.long_running_days)
+    in_region, unplaced = [], 0
+    for e in deduped:
+        if geo.keep(e):
+            in_region.append(e)
+        elif _runs_at_least(e, long_running):
+            in_region.append(e)
+            unplaced += 1
+    funnel.stage("after geo filter", len(in_region),
+                 f"{unplaced} kept without a place test, open "
+                 f"{settings.long_running_days}d or more" if unplaced else "")
 
     horizon = now + timedelta(days=settings.lookahead_days)
     # Name the bound that cut them, because the two mean opposite things: below
@@ -326,7 +338,7 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     #
     # Derived from _bound_reason rather than re-tested here, so the funnel's
     # explanation cannot drift from the filter (see its docstring for why).
-    reasons = [_bound_reason(e, now, horizon) for e in in_region]
+    reasons = [_bound_reason(e, now, horizon, still_open=long_running) for e in in_region]
     dated = [e for e, why in zip(in_region, reasons) if why is None]
     funnel.stage(f"starts within {settings.lookahead_days}d", len(dated),
                  f"{reasons.count(_STARTED)} already started, "
@@ -442,10 +454,12 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     cleared = ([e.event_uid for e, _ in worth_sending]
                + [a.event_uid for e, _ in worth_sending
                   for a in merged_away.get(e.event_uid, ())])
-    # The same grace _bound_reason applies, passed rather than re-stated, so
-    # the ledger cannot call an event over while the digest still offers it.
+    # The same grace and long_running_days _bound_reason applies, passed rather
+    # than re-stated, so the ledger cannot call an event over while the digest
+    # still offers it.
     store.expire_past(now.isoformat(),
-                      int(_START_GRACE.total_seconds() // 3600))
+                      int(_START_GRACE.total_seconds() // 3600),
+                      open_days=settings.long_running_days)
     store.save()
     # "Never emailed", not "new since last run". Dry runs mail nothing, so the
     # same events stay in this count run after run. One dry run showed 16 here
@@ -827,7 +841,8 @@ def _end_of_day(date_text: str, zone: ZoneInfo) -> str:
                         .isoformat())
 
 
-def _bound_reason(event: Event, now: datetime, horizon: datetime) -> str | None:
+def _bound_reason(event: Event, now: datetime, horizon: datetime, *,
+                  still_open: timedelta) -> str | None:
     """Which date bound excludes this event, or None to keep it.
 
     The single owner of that decision. run() reports its counts by asking here
@@ -837,6 +852,9 @@ def _bound_reason(event: Event, now: datetime, horizon: datetime) -> str | None:
     An event with no usable start is KEPT, not guessed at. The extractor fills
     these in later, and excluding them here would silently discard the whole
     newsletter tier, whose events state their date in prose rather than a field.
+
+    `still_open` is settings.long_running_days, passed rather than read so that
+    expire_past, which takes the same number, cannot disagree with it.
     """
     when = parse_iso(event.start) if event.start else None
     if when is None:
@@ -845,13 +863,24 @@ def _bound_reason(event: Event, now: datetime, horizon: datetime) -> str | None:
     # start was. Reads the end _stamp_naive synthesised, the same column
     # expire_past reads, so the filter and the ledger cannot disagree about
     # when something is finished and a multi-day listing survives its opening
-    # day in both. A stated end is not consulted for anything else; see
-    # expire_past for the measurement that rules it out.
+    # day in both.
     over = parse_iso(event.end) if event.all_day and event.end else None
     over = over or when
     if over < now - _START_GRACE:
-        return _STARTED
+        # A stated end keeps a started event only while it is still `still_open`
+        # away, which no shorter window can reach. A short stated end, such as a
+        # ticket sale closing after the event, must not, or a listing first seen
+        # after the event would be mailed as new.
+        end = parse_iso(event.end) if event.end else None
+        if end is None or end - still_open <= now:
+            return _STARTED
     return _TOO_FAR if when > horizon else None
+
+
+def _runs_at_least(event: Event, span: timedelta) -> bool:
+    start = parse_iso(event.start) if event.start else None
+    end = parse_iso(event.end) if event.end else None
+    return bool(start and end and end - start >= span)
 
 
 

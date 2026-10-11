@@ -230,13 +230,15 @@ class EventStore(ScoreCache, Protocol):
         """
         ...
 
-    def expire_past(self, now_iso: str, grace_hours: int) -> int:
+    def expire_past(self, now_iso: str, grace_hours: int, *, open_days: int) -> int:
         """Mark already-started events expired and return how many rows changed.
 
-        `grace_hours` comes from the pipeline's own start grace, so an
-        implementation must not decide for itself when an event is over; the
-        digest and the ledger disagreeing about that is a defect, not a policy
-        an implementation gets to set.
+        `grace_hours` comes from the pipeline's own start grace, and `open_days`
+        from settings.long_running_days: a started row whose end is still that
+        far away stays live. Both are passed so an implementation must not
+        decide for itself when an event is over; the digest and the ledger
+        disagreeing about that is a defect, not a policy an implementation gets
+        to set.
 
         The pipeline calls this on the store it was handed, so leaving it out of
         the protocol meant a second implementation could satisfy every declared
@@ -258,7 +260,9 @@ class EventStore(ScoreCache, Protocol):
         deadline while this query read the start alone, so an event ten days
         out whose registration closes in twelve hours classified P0 and was
         never swept. The deadline is the door this reminder exists to catch
-        before it shuts.
+        before it shuts. The two still part for an event already under way,
+        which urgency measures to its end and this does not, since a last call
+        sent during the event is the one Known_concern #3 rules out.
 
         Three further conditions, each answering a different question, and dropping any
         one of them was measured putting the wrong events in front of the

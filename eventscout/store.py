@@ -145,7 +145,10 @@ def _merge_timestamp(column: str, pick: str) -> str:
 # When the door shuts on an event, as SQL. The same expression as
 # DeadlineUrgency._hours_until's `event.rsvp_deadline or event.start`, and it
 # has to stay that way: the urgency tier and the sweep both answer "is this
-# closing soon" and disagreeing put a P0 outside every reminder window.
+# closing soon" and disagreeing put a P0 outside every reminder window. The one
+# deliberate split is an event already under way, which urgency measures to its
+# end and this keeps at its start, because Known_concern #3 rules out a last
+# call sent during the event.
 _CLOSES_AT = "COALESCE(NULLIF(rsvp_deadline, ''), NULLIF(start, ''))"
 
 
@@ -355,8 +358,12 @@ class SqliteEventStore:
                 "ELSE state END WHERE event_uid=?",
                 [(now, uid) for uid in event_uids])
 
-    def expire_past(self, now_iso: str, grace_hours: int) -> int:
+    def expire_past(self, now_iso: str, grace_hours: int, *, open_days: int) -> int:
         """Mark started events expired so the sweeper stops considering them.
+
+        `open_days` is settings.long_running_days, required for the same reason
+        as `grace_hours`. A row whose end is still that far away stays live, as
+        the pipeline's _bound_reason keeps it in scope.
 
         `grace_hours` is how long after its start an event is still live, and
         it is REQUIRED rather than defaulted. The pipeline's date window cuts on
@@ -387,16 +394,20 @@ class SqliteEventStore:
                 # listing survive past its opening day.
                 #
                 # Only when all_day, because that end is SYNTHESISED by
-                # _stamp_naive from the dates the source gave. A stated end is
-                # not trustworthy for this: measured on the live ledger, 18 of
-                # the 261 rows with one run longer than 12 hours and one runs
-                # 384, so letting every end decide would keep a two-week ticket
-                # window in the digest for two weeks.
+                # _stamp_naive from the dates the source gave. A stated end can
+                # outlast the event, as a ticket sale closing after it does:
+                # measured on the live ledger, 18 of the 261 rows with one run
+                # longer than 12 hours and one runs 384. Letting it decide
+                # would keep such a row live for two weeks after the event, and
+                # a listing first seen meanwhile would be mailed once as new.
                 "AND datetime(CASE WHEN all_day = 1 AND end_at != '' "
                 "THEN end_at ELSE start END) < datetime(?, ?) "
+                # The one exception, mirroring _bound_reason, is an end still
+                # open_days away, which a window shorter than that never is.
+                "AND NOT (end_at != '' AND datetime(end_at) > datetime(?, ?)) "
                 "AND state NOT IN ('expired','registered','saved','dismissed',"
                 "'sold_out')",
-                (now_iso, f"-{grace_hours} hours"))
+                (now_iso, f"-{grace_hours} hours", now_iso, f"+{open_days} days"))
         return cur.rowcount
 
     def get_cached_score(self, event_uid: str, model_tag: str) -> Score | None:
