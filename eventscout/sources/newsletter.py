@@ -25,12 +25,12 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import ClassVar, Iterable
+from typing import ClassVar, Iterable, Sequence
 
 from ..http import HttpClient
 from ..models import Coverage, Event, iso_or_empty, parse_iso
 from ..urls import canon_url
-from ._links import harvest, tails
+from ._links import harvest, parse_link_hints, tails
 
 log = logging.getLogger("eventscout.newsletter")
 
@@ -141,12 +141,14 @@ class NewsletterArchiveSource:
     kind: ClassVar[str] = "newsletter"
 
     def __init__(self, name: str, host: str, http: HttpClient, archive_path: str = "/archive",
-                 max_issues: int = 10, only_slugs: Iterable[str] | None = None):
+                 max_issues: int = 10, only_slugs: Iterable[str] | None = None,
+                 link_hints: Sequence[str] | None = ()):
         self.name = name
         self._host = host.rstrip("/")
         self._http = http
         self._archive_path = archive_path
         self._max_issues = max_issues
+        self._link_hints = parse_link_hints(link_hints, name)
         # `is None`, not falsy: an explicitly empty list means "no issues this
         # run", distinct from None's "use the newest instead". Pinning specific
         # slugs this way is what makes the archive backtest reproducible.
@@ -228,7 +230,7 @@ class NewsletterArchiveSource:
     def _events_from_body(self, body: str, issue: str,
                           published: str = "") -> list[Event]:
         # Keyed by RAW href, as `tails` documents, so look up before canon_url.
-        after = tails(body)
+        after = tails(body, hints=self._link_hints)
         return [Event(
             event_uid=f"{self.kind}:{canon_url(href)}",
             title=title,
@@ -255,4 +257,4 @@ class NewsletterArchiveSource:
             # check means a slice that ran into the next item fails closed
             # instead of dating this event from its neighbour.
             start=start_from_prose(after.get(href, ""), published),
-        ) for href, title in harvest(body)]
+        ) for href, title in harvest(body, hints=self._link_hints)]

@@ -66,7 +66,7 @@ from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
                                display_zone, is_date_only, iso_or_empty,
                                parse_iso)
 from eventscout.extract import PageFactExtractor
-from eventscout.sources._links import is_event_link, tails
+from eventscout.sources._links import is_event_link, parse_link_hints, tails
 from eventscout.sources.eightfold import EightfoldSource
 from eventscout.sources.gmail_label import GmailLabelSource
 from eventscout.sources._text import strip_html
@@ -296,7 +296,8 @@ def offline() -> None:
          GmailLabelSource("n", "u", "p", "label"), "GmailLabelSource (coverage)"),
         # Extractor had NO implementation until this round, so the safety net
         # had never covered it once.
-        (protocols.Extractor, PageFactExtractor(_stub_invoker, _stub), "PageFactExtractor"),
+        (protocols.Extractor, PageFactExtractor(_stub_invoker, _stub, zone_name="America/Los_Angeles"),
+         "PageFactExtractor"),
         (protocols.JsonInvoker, CliScorer(["x"], _prompt, name="x"), "CliScorer as JsonInvoker"),
         (protocols.JsonInvoker, OpenAiScorer("k", "m", _prompt), "OpenAiScorer as JsonInvoker"),
         (protocols.EventFilter, GeoFilter, "GeoFilter"),
@@ -922,6 +923,14 @@ def offline() -> None:
           str(_made))
     check("and one whose prose does not is left undated rather than guessed",
           _made.get("https://luma.com/undated") == "", str(_made))
+    _hinted = NewsletterArchiveSource("dc", "h.beehiiv.com", StubHttpClient({}),
+                                      link_hints=["events.riviancareers.com/"])
+    _hinted_made = [e.start for e in _hinted._events_from_body(
+        '<a href="https://events.riviancareers.com/early">RSVP to Rivian</a> '
+        "(Monday, August 31 at 5:30pm EST)", "https://h.beehiiv.com/p/i",
+        published="2026-08-31T16:23:13Z")]
+    check("a link only a configured hint accepts still gets its prose date",
+          _hinted_made == ["2026-08-31T17:30:00-05:00"], str(_hinted_made))
 
     section("pipeline - _deliver leaves the caller's lists alone")
     # Guards _deliver's sorted()-not-.sort() choice (see its comment): sorting
@@ -2385,6 +2394,25 @@ def offline() -> None:
           "nobody chose")
     check("and the configured name resolves",
           display_zone(load_settings().display_timezone) is not None)
+    _tz_cfg = (Path(__file__).resolve().parent / "config.yaml").read_text(encoding="utf-8")
+    check("config.yaml still sets display_timezone on a line of its own",
+          len(re.findall(r"(?m)^display_timezone: ", _tz_cfg)) == 1)
+    with tempfile.TemporaryDirectory() as tmp_tz:
+        _no_tz = Path(tmp_tz) / "no_tz.yaml"
+        _no_tz.write_text(re.sub(r"(?m)^display_timezone: .*$", "", _tz_cfg), encoding="utf-8")
+        try:
+            load_settings(_no_tz)
+            check("a config.yaml without display_timezone is refused at load", False,
+                  "it loaded, so some default zone was assumed")
+        except ValueError:
+            check("a config.yaml without display_timezone is refused at load", True)
+        _padded = Path(tmp_tz) / "padded_tz.yaml"
+        _padded.write_text(re.sub(r"(?m)^display_timezone: .*$",
+                                  'display_timezone: " America/Los_Angeles "', _tz_cfg),
+                           encoding="utf-8")
+        _padded_zone = load_settings(_padded).display_timezone
+        check("a zone name padded with spaces is stripped at load",
+              _padded_zone == "America/Los_Angeles", repr(_padded_zone))
 
     section("scoring - a bad response must not be cached as a real judgement")
     # Same incident as _parse_score's docstring (a fallback score cached
@@ -3927,6 +3955,18 @@ def offline() -> None:
         got = bay.keep(_event(source="other", location=loc,
                               attendance_mode=AttendanceMode.OFFLINE))
         check(why, got is want, f"{loc!r} kept={got}")
+    # Another reader's list, to show the state fold is no longer California's alone.
+    elsewhere =GeoFilter(("brooklyn, ny", "atlanta, georgia", "georgia tech"))
+    for why, loc, want in [
+            ("an entry with a state code matches the spelled-out state",
+             "Brooklyn, New York", True),
+            ("an entry with the spelled-out state matches the code", "Atlanta, GA", True),
+            ("a state name opening a longer name is not folded",
+             "Klaus Building, Georgia Tech", True),
+            ("the same city in another state is still dropped", "Brooklyn, Michigan", False)]:
+        got = elsewhere.keep(_event(source="other", location=loc,
+                                    attendance_mode=AttendanceMode.OFFLINE))
+        check(why, got is want, f"{loc!r} kept={got}")
     # Each of these compiled before the constructor checked its entries, and
     # the blank one kept "Tokyo, Japan".
     bad_places = [
@@ -3983,7 +4023,7 @@ def offline() -> None:
         event = _event(event_uid="newsletter:https://luma.com/x",
                        url="https://luma.com/x", source_kind="newsletter",
                        description="Linked from https://d.beehiiv.com/p/x", **kw)
-        return PageFactExtractor(_Refuser(), _Page(html)).extract(event)
+        return PageFactExtractor(_Refuser(), _Page(html), zone_name="America/Los_Angeles").extract(event)
 
     _geo_page = ('<html><script type="application/ld+json">' + json.dumps({
         "@type": "Event", "url": "https://luma.com/x", "name": "Real Name",
@@ -4015,7 +4055,7 @@ def offline() -> None:
         event = _event(event_uid="newsletter:https://luma.com/x",
                        url="https://luma.com/x", source_kind="newsletter",
                        description="Linked from https://d.beehiiv.com/p/x", **kw)
-        return PageFactExtractor(None, _Page(html)).extract(event)
+        return PageFactExtractor(None, _Page(html), zone_name="America/Los_Angeles").extract(event)
 
     modelless = _extract_modelless(_ld("https://luma.com/x"))
     check("with no model at all, the typed path still fills the date",
@@ -4050,8 +4090,8 @@ def offline() -> None:
           not any("extraction failed" in r.getMessage() for r in _records),
           f"logged {[r.getMessage()[:60] for r in _records]}")
     check("PageFactExtractor says which of its two paths is live",
-          PageFactExtractor(None, _Page("")).prose_enabled is False
-          and PageFactExtractor(_Refuser(), _Page("")).prose_enabled is True,
+          PageFactExtractor(None, _Page(""), zone_name="America/Los_Angeles").prose_enabled is False
+          and PageFactExtractor(_Refuser(), _Page(""), zone_name="America/Los_Angeles").prose_enabled is True,
           "the entry points print 'extraction off' for a run that still extracts")
     # The assembly, not just the class. Returning None here is what disabled
     # the whole extractor, so the check has to reach build_runtime itself.
@@ -4144,7 +4184,7 @@ def offline() -> None:
                        url="https://luma.com/x", source_kind=source_kind,
                        start="2026-10-05T01:00:00-07:00",
                        end="2026-10-07T10:00:00-07:00", location="")
-        return PageFactExtractor(invoker, _Page(html)).extract(event)
+        return PageFactExtractor(invoker, _Page(html), zone_name="America/Los_Angeles").extract(event)
 
     class _MidnightReader:
         def json_call(self, system, user, schema, name):
@@ -4204,7 +4244,7 @@ def offline() -> None:
     thin = _event(event_uid="newsletter:https://tesla.com/event/x",
                   url="https://tesla.com/event/x", source_kind="newsletter",
                   description="Linked from https://d.beehiiv.com/p/x")
-    out = PageFactExtractor(_LoudInvoker(), _Dead()).extract(thin)
+    out = PageFactExtractor(_LoudInvoker(), _Dead(), zone_name="America/Los_Angeles").extract(thin)
     check("an unreadable page never reaches the model", not _LoudInvoker.called,
           "the model was asked to extract from the placeholder description")
     check("nothing is invented for it", not out.start and not out.location,
@@ -4221,7 +4261,7 @@ def offline() -> None:
             return ('{"title": "", "start": "2026-08-31T17:30:00-05:00", "end": "", '
                     '"location": "Virtual", "rsvp_deadline": "", "organizer": "Tesla"}')
 
-    dated = PageFactExtractor(_DateInventor(), _DatelessPage()).extract(thin)
+    dated = PageFactExtractor(_DateInventor(), _DatelessPage(), zone_name="America/Los_Angeles").extract(thin)
     check("a timestamp is refused when the page states no date at all",
           not dated.start, f"accepted start={dated.start!r}")
     check("non-date facts from a readable page are still kept",
@@ -4243,17 +4283,35 @@ def offline() -> None:
                     '"location": "Virtual", "rsvp_deadline": "", "organizer": "IBM"}')
 
     listed = replace(thin, published_at="2026-09-16T12:00:00+00:00")
-    yearless = PageFactExtractor(_PromptRecorder(), _YearlessPage()).extract(listed)
+    yearless = PageFactExtractor(_PromptRecorder(), _YearlessPage(),
+                                 zone_name="America/Los_Angeles").extract(listed)
     check("a year-less page is resolved against the issue's publish date",
           "reference date is 2026-09-16" in _PromptRecorder.system,
           _PromptRecorder.system[-80:])
     check("and the start read from it is kept",
           yearless.start == "2026-09-15T14:00:00-07:00", f"got {yearless.start!r}")
-    PageFactExtractor(_PromptRecorder(), _YearlessPage()).extract(thin)
+    PageFactExtractor(_PromptRecorder(), _YearlessPage(),
+                      zone_name="America/Los_Angeles").extract(thin)
     today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
     check("an event with no publish date falls back to today as the reference",
           f"reference date is {today}" in _PromptRecorder.system,
           _PromptRecorder.system[-80:])
+    PageFactExtractor(_PromptRecorder(), _YearlessPage(),
+                      zone_name="Europe/Berlin").extract(thin)
+    check("an unzoned page time is read in the reader's zone, not a fixed one",
+          "assume Europe/Berlin" in _PromptRecorder.system
+          and "Los_Angeles" not in _PromptRecorder.system,
+          _PromptRecorder.system[_PromptRecorder.system.find("assume"):][:60])
+    try:
+        PageFactExtractor(None, _YearlessPage(), zone_name="Mars/Olympus_Mons")
+        check("an unknown zone is refused when the extractor is built", False, "accepted")
+    except Exception:
+        check("an unknown zone is refused when the extractor is built", True)
+    _berlin = replace(load_settings(), display_timezone="Europe/Berlin", llm_clis=[],
+                      openai_api_key="")
+    _built_extractor = build_runtime(_berlin, {"geo": load_channels()["geo"]})[2]
+    check("build_runtime hands the extractor the configured display_timezone",
+          "assume Europe/Berlin" in _built_extractor._system)
 
     check("an event whose page could not be read is kept, not dropped as "
           "out of region", geo.keep(_event(url="https://tesla.com/event/x",
@@ -4334,9 +4392,39 @@ def offline() -> None:
         ("https://www.example-events.com/discover/event/abc", True,
          "a non-Luma event under /discover/, since the list is Luma's own paths"),
     ]
+    # Read from channels.yaml as deployed, because the employer pages among the
+    # cases above are matched by its event_link_hints, not by the code.
+    _deployed_hints = parse_link_hints(load_channels().get("event_link_hints"), "channels.yaml")
     for url, want, why in link_cases:
         check(f"{'accepts' if want else 'rejects'} {why}",
-              is_event_link(url) is want, url[:88])
+              is_event_link(url, _deployed_hints) is want, url[:88])
+    _rivian = "https://events.riviancareers.com/plugin-earlycareer2027"
+    check("without channels.yaml's hints the Rivian page is not an event link",
+          not is_event_link(_rivian), "the employer fragment is still in the code")
+    _nl_built = build_sources(
+        {"newsletters": [{"name": "nl", "host": "h.beehiiv.com", "status": "verified"}],
+         "event_link_hints": ["events.riviancareers.com/"]}, StubHttpClient({}))
+    _nl_made = _nl_built[0]._events_from_body(f'<a href="{_rivian}">Rivian</a>', "issue")
+    check("an event_link_hints entry reaches the newsletter source through build_sources",
+          len(_nl_made) == 1, f"got {len(_nl_made)} events")
+    check("an absent event_link_hints adds nothing", parse_link_hints(None, "x") == ())
+    check("hints are stripped and lowered, as the lowered URL is matched",
+          parse_link_hints([" Events.X.com/ "], "x") == ("events.x.com/",))
+    # Refused by each source itself, so one built by hand is held to the same rule.
+    for why, build, error in [
+            ("a bare string", lambda: GmailLabelSource("g", "u", "p", "L",
+                                                      link_hints="/eventlisting/"),
+             TypeError),
+            ("a blank entry, which every URL contains",
+             lambda: NewsletterArchiveSource("nl", "h.beehiiv.com", StubHttpClient({}),
+                                             link_hints=["/eventlisting/", " "]),
+             ValueError)]:
+        try:
+            build()
+            check(f"link_hints as {why} is refused when the source is built", False,
+                  "accepted")
+        except error:
+            check(f"link_hints as {why} is refused when the source is built", True)
 
     section("sources.jsonld - parses offline through StubHttpClient")
     stub = StubHttpClient({"http://t/": '''<script type="application/ld+json">
@@ -4511,6 +4599,37 @@ def offline() -> None:
     finally:
         _imaplib.IMAP4_SSL = _real
 
+    # channels.yaml's event_link_hints have to reach the mailbox source through
+    # build_sources, not only the newsletter one.
+    _rivian_mail = (b"Subject: Rivian early career\r\n"
+                    b"Date: Mon, 8 Sep 2026 10:00:00 -0700\r\n"
+                    b"Content-Type: text/html\r\n\r\n<html><body>"
+                    b'<a href="https://events.riviancareers.com/plugin-earlycareer2027">'
+                    b"RSVP to Rivian</a></body></html>")
+
+    class _RivianImap(_FakeImap):
+        def uid(self, cmd, *a):
+            if cmd == "SEARCH":
+                return ("OK", [b"1"])
+            return ("OK", [(b"1 (BODY[] {0}", _rivian_mail)])
+
+    def _mail_urls(hints):
+        channels = {"gmail": [{"name": "mail", "status": "verified"}],
+                    "event_link_hints": hints}
+        _imaplib.IMAP4_SSL = lambda *a, **k: _RivianImap("ok")
+        try:
+            built = build_sources(channels, StubHttpClient({}), gmail_read_user="u",
+                                  gmail_read_password="p", gmail_read_labels=["L"])
+            return [e.url for source in built for e in source.fetch()]
+        finally:
+            _imaplib.IMAP4_SSL = _real
+
+    _with_hint, _without_hint = _mail_urls(["events.riviancareers.com/"]), _mail_urls(None)
+    check("an event_link_hints entry reaches the mailbox source through build_sources",
+          len(_with_hint) == 1, f"got {_with_hint}")
+    check("and without it the same mail yields no event", _without_hint == [],
+          f"got {_without_hint}")
+
     # Pending_fix.md #4. The digest this project mails is delivered to an address it
     # also reads, so without skip_from every link it printed comes back as an
     # Event whose description is the whole digest.
@@ -4651,7 +4770,7 @@ def offline() -> None:
     # to load" instead of its own message, so the test asserts on the message.
     import eventscout.sources.newsletter as _nl
 
-    def _exploding_harvest(_body):
+    def _exploding_harvest(_body, **_kw):
         raise RuntimeError("builder bug")
 
     reachable = StubHttpClient({"https://h.beehiiv.com/archive": _INDEX,

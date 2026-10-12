@@ -282,7 +282,7 @@ class Event:
 def display_zone(name: str) -> ZoneInfo:
     """The project's one local zone, resolved once and eagerly.
 
-    Two callers with opposite jobs. The notifier RENDERS absolute times in it,
+    Callers with opposite jobs. The notifier RENDERS absolute times in it,
     because the raw string was being sliced for display, which is only right
     when the source happens to store the reader's own offset. Measured on the
     live ledger: Luma and Gmail events carry -07:00 and printed correctly,
@@ -291,7 +291,8 @@ def display_zone(name: str) -> ZoneInfo:
     "2026-09-24 02:00" for an event that starts 2026-09-23 19:00 Pacific).
     The pipeline's _stamp_naive READS a source's unzoned time as it, which is
     the same zone for the opposite reason, an input assumption rather than an
-    output format.
+    output format, and PageFactExtractor tells the model to read a page's
+    unzoned time the same way.
 
     Here rather than in notifier.py, which is where it started: pipeline.py
     depends only on protocols, config and this module, so reaching into the

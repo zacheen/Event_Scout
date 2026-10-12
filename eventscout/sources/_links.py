@@ -30,9 +30,8 @@ _TRACKER_HOSTS = (
 )
 
 # Every list here is private: nothing outside this module imports one, and
-# exposing them would be an extension point with no consumer. Making these
-# configurable later means moving the DATA to channels.yaml, which does not
-# depend on the Python names being public.
+# exposing them would be an extension point with no consumer. What one reader
+# adds goes in channels.yaml's event_link_hints instead (see parse_link_hints).
 # Hosts whose links are plumbing, never the event being advertised.
 _IGNORED_HOSTS = (
     "beehiiv.com", "unsub.beehiiv.com", "media.beehiiv.com", "twitter.com",
@@ -40,23 +39,16 @@ _IGNORED_HOSTS = (
     "apple.com/apple-news", "mailto", "unsubscribe", "list-manage.com",
     "googleusercontent.com", "/privacy", "/terms",
 )
-# Path shapes that mark a link as a registration page rather than an article.
-# Kept narrow on purpose: one newsletter issue carries dozens of links, and a
-# loose pattern turns a single issue into dozens of junk candidates.
+# Path shapes that mark a link as a registration page rather than an article,
+# on platforms any reader meets. Kept narrow on purpose: one newsletter issue
+# carries dozens of links, and a loose pattern turns a single issue into
+# dozens of junk candidates.
 _EVENT_HINTS = (
     "/event/", "/events/", "luma.com/", "lu.ma/", "eventbrite.", "meetup.com/",
     "/register", "/rsvp", "hopin.", "airmeet.", "/webinar", "splashthat.com",
-    "/careers/events",
-    # Handshake's own event paths only. A bare "joinhandshake.com/" also matched
-    # its CDN, which is how footer icons became candidate events.
-    "joinhandshake.com/events", "joinhandshake.com/career_fairs",
-    # Employer event pages that miss the hints above. Rivian's "events" is in
-    # the host, so "/events/" misses it. IBM's /eventlisting/ has "listing"
-    # after "event", so "/event/" misses it.
-    "events.riviancareers.com/", "/eventlisting/",
 )
 
-# Static assets. An email footer's icon set matched _EVENT_HINTS purely because
+# Static assets. An email footer's icon set matched an event hint purely because
 # the host was right, so five Handshake logo PNGs were harvested as events and
 # sent to the extractor, which then tried to UTF-8 decode a PNG. Checked against
 # the path, not the Content-Type, because rejecting these must not cost a fetch.
@@ -91,7 +83,26 @@ def _is_luma_plumbing(lowered: str) -> bool:
             or parts.path.startswith(_LUMA_PLUMBING_PREFIXES))
 
 
-def is_event_link(href: str) -> bool:
+def parse_link_hints(hints, owner: str) -> tuple[str, ...]:
+    """One source's extra event hints, stripped and lowered, () for None.
+
+    Called by each harvesting source's constructor, as EightfoldSource checks
+    its own phrases, so a source built by hand gets the same refusals as one
+    built from channels.yaml's event_link_hints. A bare string iterates into
+    one-letter hints and a blank one is a substring of every URL, so either
+    would turn every link in every issue into a candidate event. Neither
+    raises on its own.
+    """
+    if hints is None:
+        return ()
+    if isinstance(hints, str):
+        raise TypeError(f"{owner}: link_hints must be a list of URL fragments, not one string")
+    if not all(isinstance(h, str) and h.strip() for h in hints):
+        raise ValueError(f"{owner}: link_hints holds a blank or non-string entry")
+    return tuple(h.strip().lower() for h in hints)
+
+
+def is_event_link(href: str, hints: tuple[str, ...] = ()) -> bool:
     lowered = href.lower().split("?", 1)[0]
     if lowered.endswith(_ASSET_SUFFIXES) or any(p in lowered for p in _ASSET_PATHS):
         return False
@@ -101,10 +112,10 @@ def is_event_link(href: str) -> bool:
         return False
     if _is_luma_plumbing(lowered):
         return False
-    return any(hint in lowered for hint in _EVENT_HINTS)
+    return any(hint in lowered for hint in _EVENT_HINTS + hints)
 
 
-def tails(body: str, chars: int = 140) -> dict[str, str]:
+def tails(body: str, chars: int = 140, hints: tuple[str, ...] = ()) -> dict[str, str]:
     """Stripped text FOLLOWING each event link, by url.
 
     Anchors only. A bare URL in a plain-text part has no markup to end it, so
@@ -120,12 +131,13 @@ def tails(body: str, chars: int = 140) -> dict[str, str]:
     out: dict[str, str] = {}
     for match in _ANCHOR.finditer(body):
         href = match.group("href")
-        if is_event_link(href) and href not in out:
+        if is_event_link(href, hints) and href not in out:
             out[href] = " ".join(strip_html(body[match.end():match.end() + chars]).split())
     return out
 
 
-def harvest(body: str, fallback_title: str = "") -> list[tuple[str, str]]:
+def harvest(body: str, fallback_title: str = "",
+            hints: tuple[str, ...] = ()) -> list[tuple[str, str]]:
     """Return (url, title) for every event-looking link in an HTML or text body.
 
     Anchors first, then bare URLs for the plain-text alternative part. Titles
@@ -136,11 +148,11 @@ def harvest(body: str, fallback_title: str = "") -> list[tuple[str, str]]:
     found: dict[str, str] = {}
     for match in _ANCHOR.finditer(body):
         href = match.group("href")
-        if is_event_link(href):
+        if is_event_link(href, hints):
             found.setdefault(href, strip_html(match.group("text")))
     for match in _BARE_URL.finditer(body):
         href = match.group(0).rstrip(".,);")
-        if is_event_link(href):
+        if is_event_link(href, hints):
             found.setdefault(href, "")
     out = []
     multi = len(found) > 1

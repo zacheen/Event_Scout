@@ -27,11 +27,11 @@ import logging
 import re
 from contextlib import contextmanager
 from email.header import decode_header, make_header
-from typing import ClassVar
+from typing import ClassVar, Sequence
 
 from ..models import Coverage, Event, iso_or_empty
 from ..urls import canon_url
-from ._links import harvest
+from ._links import harvest, parse_link_hints
 from ._text import strip_html
 
 log = logging.getLogger("eventscout.gmail")
@@ -61,8 +61,10 @@ class GmailLabelSource:
 
     def __init__(self, name: str, user: str, app_password: str, label: str,
                  newer_than_days: int = 60, max_messages: int = 500,
-                 body_chars: int = 4000, skip_from: str = ""):
+                 body_chars: int = 4000, skip_from: str = "",
+                 link_hints: Sequence[str] | None = ()):
         self.name = name
+        self._link_hints = parse_link_hints(link_hints, name)
         self._user = user
         # Google prints app passwords in four groups of four; the spaces are
         # cosmetic and IMAP rejects them.
@@ -265,7 +267,7 @@ class GmailLabelSource:
         organizer = _decode_header(message.get("From", ""))
         description = self._summary(subject, body)
         out = []
-        for href, title in harvest(body, fallback_title=subject):
+        for href, title in harvest(body, fallback_title=subject, hints=self._link_hints):
             url = canon_url(href)
             out.append(Event(
                 event_uid=f"{self.kind}:{url}",

@@ -1,5 +1,5 @@
-"""Bay Area location filter, matching the place names listed in channels.yaml
-and, for an event that carries coordinates, the distance to its search area."""
+"""Location filter, matching the place names listed in channels.yaml and, for
+an event that carries coordinates, the distance to its search area."""
 from __future__ import annotations
 
 import math
@@ -37,16 +37,41 @@ _NEGATIVE = (_REMOTE_ONLY, "anywhere", "worldwide")
 _VIRTUAL_HINTS = ("virtual", "online", "zoom", "teams meeting", "webinar")
 
 
+_US_STATES = {
+    "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar", "california": "ca",
+    "colorado": "co", "connecticut": "ct", "delaware": "de", "district of columbia": "dc",
+    "florida": "fl", "georgia": "ga", "hawaii": "hi", "idaho": "id", "illinois": "il",
+    "indiana": "in", "iowa": "ia", "kansas": "ks", "kentucky": "ky", "louisiana": "la",
+    "maine": "me", "maryland": "md", "massachusetts": "ma", "michigan": "mi",
+    "minnesota": "mn", "mississippi": "ms", "missouri": "mo", "montana": "mt",
+    "nebraska": "ne", "nevada": "nv", "new hampshire": "nh", "new jersey": "nj",
+    "new mexico": "nm", "new york": "ny", "north carolina": "nc", "north dakota": "nd",
+    "ohio": "oh", "oklahoma": "ok", "oregon": "or", "pennsylvania": "pa",
+    "rhode island": "ri", "south carolina": "sc", "south dakota": "sd", "tennessee": "tn",
+    "texas": "tx", "utah": "ut", "vermont": "vt", "virginia": "va", "washington": "wa",
+    "west virginia": "wv", "wisconsin": "wi", "wyoming": "wy",
+}
+# A state name is folded only where it closes its comma segment. Folding it
+# anywhere would turn "Klaus Building, Georgia Tech" into ", ga tech", and an
+# entry "georgia tech" would stop matching its own campus. Over 263 distinct
+# ledger locations this folded the 4 spelled ", California" exactly as a
+# California-only `\b` rule did.
+_STATE_NAME = re.compile(
+    r", (" + "|".join(sorted(map(re.escape, _US_STATES), key=len, reverse=True))
+    + r")(?=\s*(?:$|[,.()\d]|usa\b|u\.s\.|united states\b))")
+
+
 def _normalise(location: str) -> str:
-    """Lower-cased, with ", California" folded to ", ca" so one entry such as
-    "dublin, ca" matches both spellings Luma emits within one feed ("San
-    Francisco, CA" and "San Francisco, California").
+    """Lower-cased, with a US state's full name folded to its code, so one
+    entry such as "dublin, ca" matches both spellings Luma emits within one
+    feed ("San Francisco, CA" and "San Francisco, California"). Applied to the
+    place entries too, so "brooklyn, new york" in channels.yaml works as well.
     """
     text = re.sub(r"\s+", " ", (location or "").lower())
     text = re.sub(r"\s*,\s*", ", ", text)
     # Stripped so a quoted entry such as "san jose " still compiles to a
     # pattern that can match.
-    return re.sub(r", california\b", ", ca", text).strip()
+    return _STATE_NAME.sub(lambda m: f", {_US_STATES[m.group(1)]}", text).strip()
 
 
 class GeoFilter:

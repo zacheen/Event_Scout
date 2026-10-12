@@ -69,7 +69,10 @@ class Settings:
     seed_recent_days: int = 3
     require_known_publish_time: bool = True
     first_run_mode: str = "seed_plus_recent"
-    display_timezone: str = "America/Los_Angeles"
+    # Empty only for a Settings built by hand, which display_zone refuses.
+    # load_settings refuses a config.yaml without it, since a default here
+    # would state every time in one reader's zone.
+    display_timezone: str = ""
     source_precedence: list[str] = field(default_factory=list)
     gmail_user: str = ""
     gmail_password: str = ""
@@ -112,6 +115,10 @@ def load_settings(config_path: Path | None = None) -> Settings:
     if long_running_days < 1:
         raise ValueError(f"config.yaml long_running_days={long_running_days} must be at "
                          "least 1; a large value such as 3650 switches the rule off")
+    zone = raw.get("display_timezone")
+    if not isinstance(zone, str) or not zone.strip():
+        raise ValueError("config.yaml display_timezone must name the reader's IANA zone, "
+                         "such as America/Los_Angeles or Europe/Berlin")
     return Settings(
         keywords=[str(k).lower() for k in raw.get("keywords") or []],
         # Lowercased on load like keywords, so the comparison site does not
@@ -131,7 +138,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
         first_run_mode=str(first.get("mode", "seed_plus_recent")),
         seed_recent_days=int(first.get("recent_days", 3)),
         require_known_publish_time=bool(first.get("require_known_publish_time", True)),
-        display_timezone=str(raw.get("display_timezone", "America/Los_Angeles")),
+        display_timezone=zone.strip(),
         source_precedence=list(raw.get("source_precedence") or []),
         # Secrets come from the environment only, never from a committed file.
         gmail_user=os.getenv("GMAIL_USER", ""),
@@ -313,7 +320,7 @@ def _parse_labels(raw: str) -> list[str]:
 
 def _build_gmail_sources(entry: dict, user: str, password: str,
                          labels: list[str], *, body_chars: int,
-                         skip_from: str) -> list[EventSource]:
+                         skip_from: str, link_hints) -> list[EventSource]:
     """One mailbox source per label, or none with a reason on stdout.
 
     Split out of build_sources so that function stays six parallel blocks of
@@ -337,7 +344,8 @@ def _build_gmail_sources(entry: dict, user: str, password: str,
         f"gmail:{label}", user, password, label,
         newer_than_days=int(entry.get("newer_than_days", 60)),
         max_messages=int(entry.get("max_messages", 500)),
-        body_chars=body_chars, skip_from=skip_from) for label in labels]
+        body_chars=body_chars, skip_from=skip_from, link_hints=link_hints)
+        for label in labels]
 
 
 def build_sources(channels: dict, http: HttpClient,
@@ -383,17 +391,22 @@ def build_sources(channels: dict, http: HttpClient,
                 entry["name"], entry["category"],
                 float(entry["latitude"]), float(entry["longitude"]), http,
                 days_ahead=int(entry.get("days_ahead", 30))))
+    # Shared by the two link-harvesting sources, so neither drops a link the
+    # other keeps. Passed through uncoerced, as the Eightfold phrases are, so
+    # each source sees what YAML gave and can refuse it.
+    hints = channels.get("event_link_hints")
     for entry in channels.get("gmail") or []:
         if entry.get("status") == "verified":
             sources += _build_gmail_sources(
                 entry, gmail_read_user, gmail_read_password,
                 list(gmail_read_labels or []),
-                body_chars=body_chars, skip_from=skip_from)
+                body_chars=body_chars, skip_from=skip_from, link_hints=hints)
     for entry in channels.get("newsletters") or []:
         if entry.get("status") == "verified" and entry.get("host"):
             sources.append(NewsletterArchiveSource(
                 entry["name"], entry["host"], http,
-                archive_path=entry.get("archive_path", "/archive")))
+                archive_path=entry.get("archive_path", "/archive"),
+                link_hints=hints))
     return sources
 
 
@@ -426,7 +439,7 @@ def build_runtime(settings: Settings, channels: dict):
                           gmail_read_password=settings.gmail_read_password,
                           gmail_read_labels=settings.gmail_read_labels),
             build_geo(channels),
-            PageFactExtractor(invoker, http))
+            PageFactExtractor(invoker, http, zone_name=settings.display_timezone))
 
 
 def build_geo(channels: dict) -> GeoFilter:

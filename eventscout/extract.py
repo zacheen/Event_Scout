@@ -27,7 +27,7 @@ from urllib.parse import urljoin
 
 from .http import HttpClient
 from .protocols import JsonInvoker
-from .models import Event, iso_or_empty
+from .models import Event, display_zone, iso_or_empty
 from ._llm_json import lenient_json
 from .sources._text import strip_html
 from .sources._jsonld import event_nodes, flatten_text, place_coordinates
@@ -47,7 +47,7 @@ _SYSTEM = (
     "infer or estimate a date. The one exception is a missing year: when the "
     "page states a month and day but no year, use the year that puts that date "
     "closest to the reference date below. If a time is given without a zone, "
-    "assume America/Los_Angeles and write the offset explicitly. Today is "
+    "assume {zone} and write the offset explicitly. Today is "
 )
 _MAX_CHARS = 6000
 # What a start time could have been READ FROM. A month name has to sit next to
@@ -112,9 +112,15 @@ class PageFactExtractor:
     only the prose path is skipped.
     """
 
-    def __init__(self, invoker: JsonInvoker | None, http: HttpClient):
+    def __init__(self, invoker: JsonInvoker | None, http: HttpClient, *, zone_name: str):
         self._invoker = invoker
         self._http = http
+        # A page's unzoned time is read in the reader's display_timezone, as
+        # _stamp_naive reads a source's. Checked here so a bad name fails at
+        # build, not on the first page the model reads. Substituted with
+        # replace() because the prompt's JSON braces rule out str.format.
+        display_zone(zone_name)
+        self._system = _SYSTEM.replace("{zone}", zone_name)
 
     @property
     def prose_enabled(self) -> bool:
@@ -178,7 +184,7 @@ class PageFactExtractor:
         reference = event.published_at[:10] or today
         try:
             raw = self._invoker.json_call(
-                f"{_SYSTEM}{today}. The reference date is {reference}.",
+                f"{self._system}{today}. The reference date is {reference}.",
                 f"url: {event.url}\ntitle: {event.title}\n\n{text}",
                 _EXTRACT_SCHEMA, "event_facts")
         except Exception as exc:
