@@ -64,7 +64,7 @@ class JsonLdSource:
             coordinates=place_coordinates(node.get("location")),
             attendance_mode=attendance_mode(node.get("eventAttendanceMode")),
             description=str(node.get("description") or "").strip(),
-            # None of the four verified sites emit schema.org's datePublished
+            # None of the verified sites emit schema.org's datePublished
             # (see Event.published_at for the consequence of leaving it empty).
             published_at="",
         )

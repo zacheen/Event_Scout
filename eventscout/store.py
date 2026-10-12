@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS events (
     -- The source gave a day, not a moment, so `start` is local midnight by
     -- construction rather than by assertion. expire_past reads this to keep
     -- the row alive until the day is over; without it a date-only event is
-    -- retired at midday.
+    -- retired the moment its day begins.
     all_day INTEGER NOT NULL DEFAULT 0,
     keyword_hits    TEXT DEFAULT ''
 );
@@ -539,10 +539,9 @@ class SqliteEventStore:
                 f"SELECT *, {_CLOSES_AT} AS closes_at FROM events "
                 "WHERE state IN ('new','seen') AND closes_at IS NOT NULL "
                 "AND swept_at = '' AND alerted_at != '' "
-                # datetime() on BOTH bounds. The upper one always had it; the
-                # lower one compared text and so read a same-day afternoon
-                # event written in -07:00 as already past, which is precisely
-                # the event this query exists to catch.
+                # datetime() on BOTH bounds: comparing text reads a same-day
+                # afternoon event written in -07:00 as already past, which is
+                # precisely the event this query exists to catch.
                 "AND datetime(closes_at) > datetime(?) "
                 "AND datetime(closes_at) <= datetime(?, ?) "
                 # A first mail sent inside the window already was the

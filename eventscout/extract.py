@@ -129,9 +129,8 @@ class PageFactExtractor:
     def prose_enabled(self) -> bool:
         """Whether the model half runs. The typed half always does.
 
-        Exists so an entry point can say which of the two paths is live. The
-        line it feeds used to read "extraction off" for the whole extractor,
-        which is now wrong in the only case it ever printed.
+        Exists so an entry point can say which of the two paths is live, since
+        "extraction off" would be false for the typed half.
         """
         return self._invoker is not None
 

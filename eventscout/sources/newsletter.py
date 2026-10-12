@@ -96,11 +96,10 @@ def start_from_prose(text: str, published: str) -> str:
     extractor have run, so a source stating "no zone" says exactly that and one
     place decides what it means.
 
-    An earlier version of this note claimed the UTC reading was only an
-    hours-scale error and so no row changed the day it expired on. That is
-    false for any stamp before 07:00 local: "2026-10-08T00:00:00" read as UTC
-    is 2026-10-07 17:00 Pacific, and a measured San Francisco job fair expired
-    the evening before it happened.
+    Reading it as UTC is more than an hours-scale error, because it moves the
+    day of any stamp before 07:00 local: "2026-10-08T00:00:00" read as UTC is
+    2026-10-07 17:00 Pacific, and a measured San Francisco job fair expired the
+    evening before it happened.
     """
     issue = parse_iso(published)
     match = _PROSE_DATE.search(text or "")

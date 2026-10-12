@@ -380,10 +380,9 @@ def build_sources(channels: dict, http: HttpClient,
     """Instantiate every ACTIVE source. Entries whose status is held or deferred
     are skipped here rather than filtered later, so a held source costs nothing.
 
-    The status test is exact for that reason. Three of the four blocks it once read used to
-    accept any status STARTING WITH "verified", which would have quietly enabled
-    a verified_but_held or verified_pattern entry the moment one was filed under
-    a block build_sources reads.
+    The status test is exact, because a prefix match on "verified" would quietly
+    enable a verified_but_held or verified_pattern entry the moment one was
+    filed under a block build_sources reads.
 
     Nothing here reads the environment. Every value that comes from it arrives
     as an argument, so load_settings stays the single place secrets enter and

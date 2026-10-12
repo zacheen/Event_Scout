@@ -1,8 +1,8 @@
 """The run itself, with a stage-by-stage funnel so a zero is always explained.
 
-Every stage reports what it dropped. That is the point: "no matching events"
-is a legitimate outcome, but it is indistinguishable from a broken source unless
-the run says WHICH stage the events disappeared at.
+Every stage reports what it dropped, because "no matching events" is a
+legitimate outcome that is indistinguishable from a broken source unless the run
+says WHICH stage the events disappeared at.
 """
 from __future__ import annotations
 
@@ -24,10 +24,10 @@ from .scoring import DeadlineUrgency, build_scorer
 class Digest:
     """Everything _deliver needs to know about one run, before anything is sent.
 
-    Groups the values _deliver needs about THIS run, so its signature stays
-    about the collaborators it talks to. `cleared` is separate from
-    `to_send` because the seeding filter withholds events that were still
-    judged worth reporting, and the ledger has to record that judgement.
+    Kept apart so _deliver's signature stays about the collaborators it talks
+    to. `cleared` is separate from `to_send` because the seeding filter
+    withholds events that were still judged worth reporting, and the ledger has
+    to record that judgement.
     """
 
     to_send: list[tuple[Event, Score, Urgency]]
@@ -159,9 +159,9 @@ class Funnel:
         shrinking set and prints every line's delta against the line above.
         A count drawn from the ledger rather than from this run's fetch shares
         no population with the line above it, so a delta there is arithmetic
-        over two unrelated sets. Measured on 2026-09-12, 2 reminders sitting
-        under 30 new events rendered as "(-28)", reading as a late collapse on
-        the last line of the report, where the digest had in fact grown to 32.
+        over two unrelated sets. In one run, 2 reminders sitting under 30 new
+        events rendered as "(-28)", reading as a late collapse on the last line
+        of the report, where the digest had in fact grown to 32.
         """
         self.additions.append((name, count, note))
 
@@ -503,7 +503,7 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
             # branch, which is the failure _check_policies exists to prevent.
             raise ValueError(f"unhandled first_run_mode {settings.first_run_mode!r}")
 
-    # 5. the anti-miss sweep. Being told about an event three weeks ago is not
+    # 4. the anti-miss sweep. Being told about an event three weeks ago is not
     #    the same as being reminded the week it happens, and the ledger is the
     #    only thing that remembers an event the sources have long since stopped
     #    listing. Skipped while seeding, for the same reason the digest is: the
@@ -574,9 +574,9 @@ def _start_order(entry: tuple[Event, Score, Urgency]) -> datetime:
     """Sort key for a digest line, as an INSTANT rather than the raw string.
 
     Sources state different offsets, so a lexical sort disagrees with the clock.
-    Measured on the live ledger 2026-09-18: "2026-09-08T09:00:00-07:00" sorts
-    before "2026-09-08T12:30:00+00:00" on text while happening three and a half
-    hours LATER, and six dated rows changed position once the comparison used
+    In the live ledger, "2026-09-08T09:00:00-07:00" sorted before
+    "2026-09-08T12:30:00+00:00" on text while happening three and a half hours
+    LATER, and six dated rows changed position once the comparison used
     instants. Undated events sort last, where the previous "9999" sentinel put
     them.
     """
@@ -770,8 +770,8 @@ def _stamp_naive(event: Event, zone: ZoneInfo) -> Event:
     A bare date is the other case, and it is not the same as midnight. The
     source said WHICH DAY and nothing more, so a bare start becomes local
     midnight with all_day set, and a bare end becomes the last second of its
-    own local day. Midnight alone would be read as a midnight start, and the
-    row would be retired at midday by expire_past even with the start grace.
+    own local day. Midnight alone would be read as a midnight start, and
+    expire_past would retire the row while its day was still under way.
 
     An all-day event then ends at the last second of the later day, the one
     the source stated or the start's own. That keeps a multi-day listing alive
@@ -810,17 +810,16 @@ def _stamp_naive(event: Event, zone: ZoneInfo) -> Event:
         patch["all_day"] = True
         patch["start"] = iso_or_empty(
             datetime.fromisoformat(event.start).replace(tzinfo=zone).isoformat())
-        # The last second of the LATER day, the one the source stated or the
-        # start's own -- day only, never a stated clock time, since all_day
-        # means the source knew a day and not a time. An end that merely
-        # repeats the start is pushed out to end-of-day rather than left at
-        # the same instant, which is what stops build_ics emitting a
-        # zero-length VEVENT, and a day genuinely further out is kept in full:
-        # expire_past and _bound_reason both read this column for an all-day
-        # row on the strength that _stamp_naive always synthesises it, so
-        # flattening a five-day conference onto its opening day, or letting a
-        # stated clock time through unaltered, would each just as surely
-        # reopen the case those two say they are safe from.
+        # Day only, never a stated clock time, since all_day means the source
+        # knew a day and not a time. An end that merely repeats the start is
+        # pushed out to end-of-day rather than left at the same instant, which
+        # is what stops build_ics emitting a zero-length VEVENT, and a day
+        # genuinely further out is kept in full: expire_past and _bound_reason
+        # both read this column for an all-day row on the strength that
+        # _stamp_naive always synthesises it, so flattening a five-day
+        # conference onto its opening day, or letting a stated clock time
+        # through unaltered, would each just as surely reopen the case those two
+        # say they are safe from.
         #
         # Reads `patch.get("end") or event.end`, never the patch alone. An end
         # that already carried an offset was never stamped, so it is absent
@@ -934,7 +933,7 @@ def _at_capacity(event: Event, settings: Settings) -> bool:
 def _hits(event: Event, settings: Settings) -> list[str]:
     """Terms admitting this event, matched on the title plus a bounded prefix.
 
-    The bound is the point. A newsletter issue runs to hundreds of thousands of
+    The bound exists because a newsletter issue runs to hundreds of thousands of
     characters and mentions nearly every candidate term somewhere, so matching
     the whole body with min_hits 1 admits every issue and filters nothing.
     """

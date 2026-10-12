@@ -238,8 +238,7 @@ keyword_match_prefix_chars: 2000
 # but a bare "closed" does not, since that also describes a passed deadline,
 # already handled by the date window.
 #
-# Measured 2026-09-10, the listing that motivated this read
-# "K-AI Tech Week - Silicon Valley (SOLD OUT)".
+# The listing that motivated this read "K-AI Tech Week - Silicon Valley (SOLD OUT)".
 capacity_markers:
   - "sold out"
   - "sold-out"                 # both spellings, sites differ
@@ -308,10 +307,10 @@ lookahead_days: 120
 # stays in scope while its end is more than this far away, and when its stated
 # window spans this long it skips the geo filter. Many such windows are
 # registrations for an in-person event elsewhere, which is accepted, and 30 is
-# a starting point to tune against the digests it produces. Measured 2026-10-11
-# on the seven Eightfold tenants, 68 events passed instead of 26, and most of
-# the 42 added were campus events in Singapore and at other schools. No ledger
-# row from any other source had a window this long.
+# a starting point to tune against the digests it produces. In one run over the
+# Eightfold tenants, 68 events passed instead of 26, and most of the 42 added
+# were campus events in Singapore and at other schools. No ledger row from any
+# other source had a window this long.
 long_running_days: 30
 
 # --- Delivery --------------------------------------------------------------
@@ -388,8 +387,8 @@ first_run:
   recent_days: 3
   # An item whose publish time is unknown is EXCLUDED on the first run rather
   # than assumed recent. Measured consequence: schema.org Event
-  # carries startDate and endDate but no datePublished, and none of the four
-  # JSON-LD sources emit one, so all 70 of their events sit out the first run.
+  # carries startDate and endDate but no datePublished, and none of the
+  # JSON-LD sources emit one, so all of their events sit out the first run.
   # Only WordPress (post `date`), the newsletter archive (issue date) and Gmail
   # (message Date header) have a real publish time. Set this false to fall back
   # to startDate for sources that cannot report one.

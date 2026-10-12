@@ -290,12 +290,15 @@ class GmailLabelSource:
         subject = _decode_header(message.get("Subject", "")).strip()
         sent = _sent_at(message)
         body = self._body(message)
-        # Hoisted: both are the same for every link in this message, and
-        # _summary strips the entire body each time it runs.
-        # The From header, which both scoring tiers read. Kept in the live run
-        # and withheld at export instead (see store._UNPUBLISHED_COLUMNS),
-        # because it names a third party and a sender is not always the
-        # organizer, so it is input to a score rather than a fact to publish.
+        # organizer and description are hoisted out of the loop: both are the
+        # same for every link in this message, and _summary strips the entire
+        # body each time it runs.
+        #
+        # organizer is the From header, which both scoring tiers read. Kept in
+        # the live run and withheld at export instead (see
+        # store._UNPUBLISHED_COLUMNS), because it names a third party and a
+        # sender is not always the organizer, so it is input to a score rather
+        # than a fact to publish.
         organizer = _decode_header(message.get("From", ""))
         description = self._summary(subject, body)
         out = []

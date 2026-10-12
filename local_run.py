@@ -1,43 +1,47 @@
 """Run the real pipeline locally and judge it from the result.
 
-    conda run -n ML python local_run.py            # fetch, score, EMAIL
-    conda run -n ML python local_run.py --dry-run  # same, printed instead of sent
-    conda run -n ML python local_run.py --show-digest  # EMAIL, and also print
-                                                  # the body exactly as sent
-    conda run -n ML python local_run.py --reset    # forget the ledger, first run
-                                                  # again. What that mails is
-                                                  # config.yaml first_run.mode;
-                                                  # report_everything sends the
-                                                  # whole backlog in one digest
-    conda run -n ML python local_run.py --mark registered https://luma.com/x
-                                                  # and: saved, dismissed. Stops
-                                                  # the last-call reminder for
-                                                  # that event, and nothing else
-    conda run -n ML python local_run.py --all      # report EVERY in-scope event,
-                                                  # ignoring "already seen"
-    conda run -n ML python local_run.py --no-extract   # skip page extraction
-                                                  # entirely: the free JSON-LD
-                                                  # path as well as any model call
+Each line below runs as
+`conda run --no-capture-output -n ML python local_run.py ...`. Without that
+flag conda re-prints the output through the console codepage, and the Chinese
+in the score reasons raises UnicodeEncodeError. The run itself has completed
+by then, so it looks like a crash after the ledger has already moved.
+
+    local_run.py                        # fetch, score, EMAIL
+    local_run.py --dry-run              # same, printed instead of sent
+    local_run.py --show-digest          # EMAIL, and also print the body
+                                        # exactly as sent
+    local_run.py --reset                # forget the ledger, first run again.
+                                        # What that mails is config.yaml
+                                        # first_run.mode; report_everything
+                                        # sends the whole backlog in one digest
+    local_run.py --mark registered https://luma.com/x
+                                        # and: saved, dismissed. Stops the
+                                        # last-call reminder for that event,
+                                        # and nothing else
+    local_run.py --all                  # report EVERY in-scope event,
+                                        # ignoring "already seen"
+    local_run.py --no-extract           # skip page extraction entirely: the
+                                        # free JSON-LD path as well as any
+                                        # model call
 
 `--all` exists because judging output quality is impossible once a run has
 actually reported something. Everything it reported is then marked, so later
 runs correctly report zero new ones and there is nothing left to look at. Use
 --all to inspect, not on a schedule.
 
-A --dry-run is NOT read-only, which the ledger file size makes obvious and
-this paragraph exists so nobody has to discover it that way. It upserts every
-event it saw, lets expire_past flip started ones to `expired`, and keeps the
-scores it already paid the model for. What it withholds are the three records
-that mean "you were told", namely cleared_floor_at, alerted_at and swept_at.
-Only the first of those decides whether an event still counts as new, so a
-preview costs you no coverage even though the file grows. That split is not a
-convenience; writing "reported" before the send would turn one refused SMTP
-call into permanent silence, since the event would then read as reported while
-alerted_at stayed empty and the last-call sweep skipped it too.
+A --dry-run is NOT read-only. It upserts every event it saw, lets expire_past
+flip started ones to `expired`, and keeps the scores it already paid the model
+for. What it withholds are the three records that mean "you were told", namely
+cleared_floor_at, alerted_at and swept_at. Only the first of those decides
+whether an event still counts as new, so a preview costs you no coverage even
+though the file grows. That split is not a convenience; writing "reported"
+before the send would turn one refused SMTP call into permanent silence, since
+the event would then read as reported while alerted_at stayed empty and the
+last-call sweep skipped it too.
 
-There is no git plumbing here: the ledger is a
-single SQLite file (local_events.db, gitignored), so a local run never touches
-shared state and can be reset freely.
+The ledger is a single SQLite file (local_events.db, gitignored), so a local
+run never touches shared state. --reset deletes it, and with it the record of
+what was already mailed, even when --dry-run is passed too.
 
 Secrets come from .env (GMAIL_USER / GMAIL_APP_PASSWORD / MAIL_TO). Without
 them the run still works, it just falls back to printing the digest.

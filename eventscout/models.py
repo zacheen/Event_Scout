@@ -64,9 +64,9 @@ class Urgency(StrEnum):
 
 
 class State(StrEnum):
-    """Lifecycle of one event in the ledger. `saved`, `registered`, `dismissed`
-    and `expired` are terminal for alerting purposes; the sweeper only
-    re-alerts the others."""
+    """Lifecycle of one event in the ledger. `saved`, `registered`, `dismissed`,
+    `expired` and `sold_out` are terminal for alerting purposes; the sweeper
+    only re-alerts the others."""
 
     NEW = "new"
     SEEN = "seen"
@@ -85,9 +85,9 @@ class State(StrEnum):
     def choosable(self) -> bool:
         """States the READER can put an event into.
 
-        silences_sweeper minus EXPIRED, which only time can cause. Named here
-        so the CLI's allow-list and its rejection test cannot drift into
-        disagreeing about the same rule.
+        silences_sweeper minus EXPIRED and SOLD_OUT, which only time and the
+        listing can cause. Named here so the CLI's allow-list and its
+        rejection test cannot drift into disagreeing about the same rule.
         """
         return self.silences_sweeper and self not in (State.EXPIRED, State.SOLD_OUT)
 
@@ -284,11 +284,11 @@ def display_zone(name: str) -> ZoneInfo:
 
     Callers with opposite jobs. The notifier RENDERS absolute times in it,
     because the raw string was being sliced for display, which is only right
-    when the source happens to store the reader's own offset. Measured on the
-    live ledger: Luma and Gmail events carry -07:00 and printed correctly,
-    while every neu-alumni-events row carries +00:00 and printed 7 hours late,
-    one of them on the wrong DAY (2026-09-24T02:00:00+00:00 shown as
-    "2026-09-24 02:00" for an event that starts 2026-09-23 19:00 Pacific).
+    when the source happens to store the reader's own offset. Luma and Gmail
+    events carry -07:00 and printed correctly, while every neu-alumni-events
+    row carries +00:00 and printed 7 hours late, one of them on the wrong DAY
+    (2026-09-24T02:00:00+00:00 shown as "2026-09-24 02:00" for an event that
+    starts 2026-09-23 19:00 Pacific).
     The pipeline's _stamp_naive READS a source's unzoned time as it, which is
     the same zone for the opposite reason, an input assumption rather than an
     output format, and PageFactExtractor tells the model to read a page's
@@ -361,15 +361,14 @@ def iso_or_empty(value: object) -> str:
     if is_date_only(text):
         return text
     # Re-emitted WITHOUT forcing a timezone: a source that stated none is not
-    # improved by pretending it meant UTC here. parse_iso is what fills one in
-    # for callers needing an instant, and it assumes UTC. An earlier version of
-    # this comment claimed the geo and urgency layers read a naive stamp as
-    # LOCAL, which was never true: geo.py parses no dates at all, and every
-    # urgency path goes through parse_iso. The consequence to remember is that a
-    # naive value and a parse_iso instant agree only when the source really did
-    # mean UTC, which is why the pipeline's _stamp_naive attaches an offset
-    # before anything is stored: SQLite makes the same UTC assumption inside
-    # expire_past, and no Python-side fallback can reach that comparison.
+    # improved by pretending it meant UTC here. parse_iso fills one in for
+    # callers needing an instant, and it assumes UTC; geo.py parses no dates and
+    # every urgency path goes through parse_iso, so no layer reads a naive stamp
+    # as local. A naive value and a parse_iso instant therefore agree only when
+    # the source really did mean UTC, which is why the pipeline's _stamp_naive
+    # attaches an offset before anything is stored: SQLite makes the same UTC
+    # assumption inside expire_past, and no Python-side fallback can reach that
+    # comparison.
     try:
         return datetime.fromisoformat(
             text.replace("Z", "+00:00")).isoformat(timespec="seconds")

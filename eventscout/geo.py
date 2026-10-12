@@ -84,9 +84,8 @@ class GeoFilter:
     """Keeps attendable events, satisfying EventFilter with a single argument.
 
     `regional_sources` comes from channels.yaml's per-source `in_region` flag
-    and is resolved once at construction rather than passed per call, so
-    `keep` can stay single-arg and match the `EventFilter` protocol without
-    callers having to isinstance-check for a wider signature.
+    and is fixed at construction rather than passed per call, so `keep` stays
+    single-arg as the `EventFilter` protocol requires.
 
     `places` are matched as whole words, so "dublin, ca" does not match
     "Dublin, Canada" and "pittsburg" does not match "Pittsburgh".
@@ -139,15 +138,14 @@ class GeoFilter:
         # Everything below here did not match by name, because no Bay Area city
         # is named or because the text says remote only. An event whose location
         # text says it is online, or names nowhere on earth ("Remote only",
-        # "Worldwide"), is accept_virtual's decision and nothing else's. Falling through
-        # instead reached the two fallbacks, which answer different questions:
-        # page_unreadable means nothing could be READ, and the in-region
-        # fallback means no city was NAMED, while these locations named
-        # something that simply is not a place. That is how a remote-only event
-        # from an in_region source was kept as if it were local, and why setting
-        # accept_virtual false changed nothing for it. An earlier review
-        # proposed rejecting these outright instead, which would drop the online
-        # events this flag exists to keep.
+        # "Worldwide"), is accept_virtual's decision and nothing else's. Falling
+        # through instead reached the two fallbacks, which answer different
+        # questions: page_unreadable means nothing could be READ, and the
+        # in-region fallback means no city was NAMED, while these locations
+        # named something that simply is not a place. That is how a remote-only
+        # event from an in_region source was kept as if it were local, and why
+        # setting accept_virtual false changed nothing for it. Rejecting these
+        # outright would drop the online events this flag exists to keep.
         if self._text_says_virtual(event.location) or self._states_nowhere(event.location):
             return self._accept_virtual
         # Coordinates settle what the name rules below cannot, a venue-only

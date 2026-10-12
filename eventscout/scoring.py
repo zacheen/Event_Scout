@@ -121,10 +121,10 @@ def _bounded(terms) -> list[tuple[str, "re.Pattern", int]]:
     is deliberate and measured. Exact-phrase matching once left 65 of 70 events
     at the access floor, and `recruit` has to keep reaching "recruiting",
     `hack` "hackathon" and "hackday", `intern` "internship". A two-sided
-    `(?<![a-z0-9])kw s?(?![a-z0-9])` was tried and rejected here: measured
-    2026-09-18 it broke all four of those. So only the LEFT-side collisions are
-    fixed: `resume` no longer matches "presume", `hack` no longer matches
-    "shack", and `ml` no longer matches inside "html".
+    `(?<![a-z0-9])kw s?(?![a-z0-9])` was tried and rejected here, because it
+    broke all four of those. So only the LEFT-side collisions are fixed:
+    `resume` no longer matches "presume", `hack` no longer matches "shack", and
+    `ml` no longer matches inside "html".
 
     Three RIGHT-side collisions are accepted, because no boundary can separate
     two continuations of one prefix. `intern` still reaches "internal",
@@ -225,9 +225,6 @@ def _as_number(value: object) -> float | None:
 
 def _parse_score(raw: str, method: str) -> Score:
     """Pull the score object out of a model response.
-
-    The CLI tier cannot be told to emit strict JSON, so a lenient brace scan is
-    required there; the API tier is schema-constrained and always parses.
 
     An unparseable response RAISES rather than returning a middling score. The
     old fallback of fit=5, access_value=1 is rank 5, below the digest floor,

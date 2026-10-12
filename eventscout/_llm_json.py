@@ -1,8 +1,8 @@
 """Reading JSON back out of a model reply.
 
 Extracted rather than duplicated, for the reason _configured_tier's docstring
-already records twice: two copies of one rule drift, and the next edit to this
-regex would only ever reach one of them.
+gives: two copies of one rule drift, and the next edit to this regex would
+only ever reach one of them.
 """
 from __future__ import annotations
 

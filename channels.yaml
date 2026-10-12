@@ -36,14 +36,14 @@
 # (the archive parser is written against beehiiv markup only). The `kind` field
 # present on today's entries is a note to the reader, nothing reads it.
 #
-# Verification status is recorded per entry. "verified" means an HTTP probe on
-# 2026-09-06 or 2026-09-07 returned usable data. "spike" means the adapter needs
-# a feasibility check first. Never promote a spike to verified without a probe.
+# Verification status is recorded per entry. "verified" means an HTTP probe
+# returned usable data. "spike" means the adapter needs a feasibility check
+# first. Never promote a spike to verified without a probe.
 #
 # ---------------------------------------------------------------------------
-# Of one batch of nine sites submitted, four were taken, and they are the
-# jsonld entries marked "Added 2026-09-07". That cut applies to that batch
-# alone. Anything verified before it stays regardless.
+# Sites are sometimes submitted in batches and only some of a batch is taken.
+# Such a cut applies to that batch alone, so anything verified before it stays
+# regardless.
 #
 # Which sources are active, decided-but-not-running, or held back despite
 # working is recorded per entry below via `status`, not repeated here.
@@ -472,7 +472,8 @@ eightfold:
     # Its two "Early Career Opportunities" and "2027 Summer Internship
     # Recruiting" are the registrations eightfold_registration_phrases exists
     # for, and the only events of this tenant that pass, meaning the geo
-    # filter and the date window both keep them, as "passing" means below.
+    # filter and the date window both keep them. "Passing" means the same in
+    # the entries below.
 
   - name: appliedmaterials-eightfold
     adapter: eightfold
@@ -558,11 +559,11 @@ luma_discover:
     # organisers we do not track individually.
     # Probed 2026-10-09: 30 days took 7 pages, 21 days 6 and 14 days 5, and
     # the seventh page's last event started 49 days out, since paging stops
-    # on a whole page. All
-    # 25 events the page's JSON-LD carried were in the API's first 50, and
-    # the JSON-LD gave none of them a description either. It named only a
-    # venue or street for 15 of those 25, which the geo filter dropped, while
-    # the API's address names the city and kept 299 of the 300 it returned.
+    # on a whole page. All 25 events the page's JSON-LD carried were in the
+    # API's first 50, and the JSON-LD gave none of them a description either.
+    # It named only a venue or street for 15 of those 25, which the geo filter
+    # dropped, while the API's address names the city and kept 299 of the 300
+    # it returned.
 
 # ---------------------------------------------------------------------------
 # TIER B - Bay Area event platforms. Higher value here than in Boston because

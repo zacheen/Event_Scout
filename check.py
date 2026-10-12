@@ -1,8 +1,11 @@
 """Event Scout self-check. Run it directly, read the terminal.
 
-    conda run -n ML python check.py            # everything
-    conda run -n ML python check.py --offline  # skip anything that hits the network
-    conda run -n ML python check.py --live     # only the network checks
+    conda run --no-capture-output -n ML python check.py            # everything
+    conda run --no-capture-output -n ML python check.py --offline  # skip the network
+    conda run --no-capture-output -n ML python check.py --live     # only the network
+
+Without --no-capture-output conda re-prints the output through the console
+codepage, which raises UnicodeEncodeError on the Chinese in score reasons.
 
 Three outcomes, and the distinction matters.
 
@@ -212,11 +215,9 @@ def _event(**kw) -> Event:
 # --------------------------------------------------------------------------
 def offline() -> None:
     section("Funnel - a delta only means something between two of the same set")
-    # The bug these lock down was found by eye, not by a test: one run's
-    # reminders count was recorded with stage(), so render_funnel subtracted it
-    # from the line above and printed "(-28)" under 30 new events. It reads as a
-    # late collapse on the LAST line of the report, where the digest had in fact
-    # grown to 32. Asserted on the rendered text, because the misleading part was
+    # The bug these lock down was found by eye, not by a test (see Funnel.added):
+    # a reminders count recorded with stage() printed "(-28)" under 30 new
+    # events. Asserted on the rendered text, because the misleading part was
     # never the stored count.
     _f = Funnel()
     _f.stage("fetched", 30)
@@ -230,9 +231,7 @@ def offline() -> None:
     _f.stage("after geo filter", 25)
     check("a real narrowing still shows its delta",
           "(-5)" in render_funnel(_f), render_funnel(_f))
-    # first_zero answers "which filter emptied the run". A zero in additions
-    # means nothing was due for a reminder, and a zero in per_source is already
-    # flagged separately, so neither belongs in that answer.
+    # first_zero ignores additions and per_source (see its docstring).
     _z = Funnel()
     _z.source("dead-source", 0)
     _z.stage("fetched", 5)
@@ -294,8 +293,6 @@ def offline() -> None:
          GmailLabelSource("n", "u", "p", "label"), "GmailLabelSource"),
         (protocols.BoundedSource,
          GmailLabelSource("n", "u", "p", "label"), "GmailLabelSource (coverage)"),
-        # Extractor had NO implementation until this round, so the safety net
-        # had never covered it once.
         (protocols.Extractor, PageFactExtractor(_stub_invoker, _stub, zone_name="America/Los_Angeles"),
          "PageFactExtractor"),
         (protocols.JsonInvoker, CliScorer(["x"], _prompt, name="x"), "CliScorer as JsonInvoker"),
@@ -481,10 +478,8 @@ def offline() -> None:
           isinstance(e.attendance_mode, AttendanceMode) and e.attendance_mode.name == "UNKNOWN",
           f"got {type(e.attendance_mode).__name__}")
 
-    # The None coercion reads the FIELD DEFAULT, so every new non-string field
-    # has to be covered by that isinstance check or it silently becomes "".
-    # attendance_mode was the first to be caught by this; page_unreadable is a
-    # bool and would have been the second.
+    # The None coercion reads the FIELD DEFAULT, so every non-string field has to
+    # be covered by that isinstance check or it silently becomes "".
     check("a None bool field falls back to its default, not to a string",
           _event(page_unreadable=None).page_unreadable is False,
           f"got {_event(page_unreadable=None).page_unreadable!r}")
@@ -557,9 +552,10 @@ def offline() -> None:
     # "software engineer" carries the FIT weight on purpose. Before the keyword
     # tier gained a left word boundary, this fixture cleared digest_min_rank
     # only because the bare term "ai" matched inside "fair", which is the exact
-    # collision that boundary was added to remove. Measured: without
-    # a real topical term the fixture scored fit 1, access 5, rank 5, so every
-    # pipeline test below it silently stopped exercising a reportable event.
+    # collision that boundary was added to remove. Without a real topical term
+    # it scores fit 1, access 10, rank 10, exactly the digest_min_rank floor, so
+    # a small change to either would silently stop every pipeline test below it
+    # exercising a reportable event.
     _RICH = ("Career fair and resume review with recruiters hiring software "
              "engineers for internships and full-time roles")
 
@@ -931,9 +927,9 @@ def offline() -> None:
           not _moved, f"moved {_moved}")
 
     section("pipeline - a full event is recorded but never mailed")
-    # Capacity withholding end to end. The unit tests above cover _at_capacity, but the
-    # wiring is what decides whether a full event reaches the digest, and it is
-    # one list comprehension away from every one of them.
+    # Capacity withholding end to end. The unit tests below cover _at_capacity,
+    # but the wiring is what decides whether a full event reaches the digest, and
+    # it is one list comprehension away from every one of them.
     class _FullPair:
         kind = name = "jsonld"
 
@@ -977,7 +973,7 @@ def offline() -> None:
           "https://luma.com/full" not in alerted, f"alerted {alerted}")
 
     section("newsletter - the prose date reaches the Event")
-    # start_from_prose is unit tested above; this covers the one line that
+    # start_from_prose is unit tested below; this covers the one line that
     # attaches its answer to the event, which no unit test can reach.
     _nl = NewsletterArchiveSource("dc", "h.beehiiv.com", StubHttpClient({}))
     _issue_body = (
@@ -1106,11 +1102,11 @@ def offline() -> None:
             db.close()
 
     section("pipeline._stamp_naive - a stamp with no offset is not UTC")
-    # The measured row this exists for: eventbrite-sf-tech-career published
-    # "San Francisco Job Fair October 8, 2026" as "2026-10-08T00:00:00". Read
-    # as UTC that is 2026-10-07 17:00 Pacific, so expire_past retired it the
-    # evening BEFORE it happened and due_for_resweep, which takes only 'new'
-    # and 'seen', could never offer the last call.
+    # The measured row this exists for (see run()'s comment at the stamp):
+    # eventbrite-sf-tech-career published "San Francisco Job Fair October 8,
+    # 2026" as "2026-10-08T00:00:00". Once expire_past retired it, the
+    # due_for_resweep query, which takes only 'new' and 'seen', could never
+    # offer the last call.
     _pac = display_zone("America/Los_Angeles")
     _naive = _event(start="2026-10-08T00:00:00", end="2026-10-08T17:00:00",
                     rsvp_deadline="2026-10-07T12:00:00",
@@ -1122,9 +1118,8 @@ def offline() -> None:
           (_fixed.end, _fixed.rsvp_deadline) == ("2026-10-08T17:00:00-07:00",
                                                  "2026-10-07T12:00:00-07:00"),
           f"got {_fixed.end!r} and {_fixed.rsvp_deadline!r}")
-    # Left alone on purpose: _seed_eligible compares it in whole days, so a
-    # seven-hour shift cannot reach the boundary it turns on, and stamping it
-    # would claim a precision the publish time never had.
+    # Left alone on purpose (see _stamp_naive's docstring), and stamping it would
+    # claim a precision the publish time never had.
     check("published_at is left naive",
           _fixed.published_at == "2026-09-01T00:00:00",
           f"got {_fixed.published_at!r}")
@@ -1132,9 +1127,7 @@ def offline() -> None:
           parse_iso(_fixed.start).astimezone(_pac).strftime("%Y-%m-%d")
           == "2026-10-08",
           "the job fair still shows the day before")
-    # ZoneInfo reads the offset off the DATE. A fixed -07:00 would put a
-    # January event an hour out, which is the bug display_zone already fixed on
-    # the rendering side.
+    # ZoneInfo reads the offset off the DATE (see _stamp_naive).
     _winter = _stamp_naive(_event(start="2026-01-15T09:00:00"), _pac)
     check("a winter date gets standard time, not a frozen summer offset",
           _winter.start == "2026-01-15T09:00:00-08:00", f"got {_winter.start!r}")
@@ -1166,14 +1159,13 @@ def offline() -> None:
             ).fetchone()[0]
             check("what reaches the LEDGER carries the offset, not the run only",
                   stored == "2026-10-08T00:00:00-07:00", f"stored {stored!r}")
-            # The whole point. SQLite compares this string itself inside
-            # expire_past, so a Python-side fix would never have reached here.
+            # SQLite compares this string itself inside expire_past, so a
+            # Python-side fix would never have reached here.
             #
             # 20:00 Pacific on the 7th sits BETWEEN the two readings on
             # purpose: the naive string read as UTC started three hours ago,
-            # while the stamped one is still eleven hours away. A `now` outside
-            # that gap passes either way, which an earlier draft of this line
-            # did until a mutation showed it surviving.
+            # while the stamped one is still four hours away. A `now` outside
+            # that gap passes either way.
             db.expire_past("2026-10-08T03:00:00+00:00", 0, open_days=30)
             state = db._conn.execute(
                 "SELECT state FROM events WHERE event_uid='jsonld:fair'"
@@ -1190,8 +1182,8 @@ def offline() -> None:
     _grace = int(_START_GRACE.total_seconds() // 3600)
     # Measured on the live eventbrite feed: all 18 nodes state startDate and
     # endDate as bare dates, "2026-10-08" for "San Francisco Job Fair October
-    # 8, 2026". Expanded to midnight, that row printed a 00:00 start, and the
-    # start grace then retired it at midday on the day of the fair.
+    # 8, 2026". Expanded to midnight, that row printed a 00:00 start, and
+    # expire_past then retired it while the day of the fair was under way.
     check("iso_or_empty keeps a bare date bare, since midnight is not a day",
           iso_or_empty("2026-10-08") == "2026-10-08",
           f"got {iso_or_empty('2026-10-08')!r}")
@@ -1393,11 +1385,10 @@ def offline() -> None:
                   len(_due) == 1 and _due[0].all_day is True,
                   f"got {[(e.event_uid, e.all_day) for e in _due]}")
             # 16:00 Pacific on the day of the fair, chosen so the two answers
-            # differ. The start is 07:00 UTC and the grace puts the cutoff at
-            # 11:00 UTC, so an unshifted row is already past it while the
-            # shifted one is not. A `now` of 19:00 UTC, the obvious "midday",
-            # lands the cutoff exactly ON the start and passes either way,
-            # which is what a mutation caught.
+            # differ. The start is 07:00 UTC and the synthesised end is 06:59:59
+            # UTC the next day, so a cutoff at 23:00 UTC less the grace falls
+            # between them: a row judged on its start is past it, one judged on
+            # its end is not.
             db.expire_past("2026-10-08T23:00:00+00:00", _grace, open_days=30)
             state = db._conn.execute("SELECT state FROM events").fetchone()[0]
             check("and SQL keeps it alive at midday on the day itself",
@@ -1663,10 +1654,10 @@ def offline() -> None:
             db.close()
 
     section("pipeline._compose - a heading names the cut it actually makes")
-    # Measured on one run: the heading promised "within 72h" and was empty,
-    # while 10 of the 11 events below it started inside 72 hours, the nearest
-    # in 13. The split is Urgency.P0, which needs p0_min_rank as well as the
-    # clock, so the heading was describing a partition it does not perform.
+    # Regression for a heading that promised "within 72h" and was empty while
+    # events below it started inside 72 hours (see _compose for the measured
+    # case). The split is Urgency.P0, which needs p0_min_rank as well as the
+    # clock.
     heads = [head for head, _ in _compose(
         Digest([(_event(start=_WHEN), Score(fit=5, access_value=5, cost=2), Urgency.P2)],
                [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)),
@@ -1681,8 +1672,8 @@ def offline() -> None:
           f"headings {heads}")
 
     section("pipeline._compose - TOP PICKS is ordered like OTHER PICKS")
-    # A digest has printed TOP PICKS ranks as 48, 48, 42, 48, because only
-    # OTHER PICKS was sorted while TOP PICKS kept fetch order.
+    # Only OTHER PICKS used to be sorted while TOP PICKS kept fetch order (see
+    # _compose).
     _late = "2026-09-24T09:00:00-07:00"
     _soon = "2026-09-23T09:00:00-07:00"
     _top = _compose(Digest([
@@ -1700,7 +1691,7 @@ def offline() -> None:
           f"order {urls}")
 
     section("pipeline - the last-call sweep, once and only once")
-    # See run()'s step-5 comment for why the sweep exists. Run 2 below fetches
+    # See run()'s step-4 comment for why the sweep exists. Run 2 below fetches
     # nothing at all -- only the ledger still remembers the event.
     _T0 = datetime(2026, 9, 20, tzinfo=timezone.utc)
     _SOON = "2026-09-30T18:00:00-07:00"
@@ -2403,7 +2394,7 @@ def offline() -> None:
     # the way out so scored events are not re-scored, but a workflow step
     # defaults to `if: success()`, so the commit that PUBLISHES that export was
     # being skipped on exactly the runs the export exists for. Asserted against
-    # the real workflow, because none of it has ever executed (item 7).
+    # the real workflow, because none of it has ever executed (Pending_fix.md #6).
     _wf = yaml.safe_load(
         (_root / ".github" / "workflows" / "scan.yml").read_text(encoding="utf-8"))
     _steps = _wf["jobs"]["scan"]["steps"]
@@ -2584,9 +2575,8 @@ def offline() -> None:
             db.close()
 
     section("local_run --mark - the verb the ledger always had a noun for")
-    # SAVED / REGISTERED / DISMISSED silence the sweeper, but nothing could
-    # write them, so "have you dealt with this" had no answer and the last call
-    # had to assume no. The heading used to claim otherwise.
+    # SAVED / REGISTERED / DISMISSED silence the sweeper (see local_run._mark
+    # for why nothing could write them before).
     import local_run
 
     with tempfile.TemporaryDirectory() as tmp_mark:
@@ -2650,10 +2640,7 @@ def offline() -> None:
         got = start_from_prose(f"({prose})", _ISSUE)
         check(f"reads {prose!r}", got == want, f"got {got!r}, wanted {want!r}")
     # A time with no stated zone stays offset-free rather than being assigned
-    # one HERE. The pipeline's _stamp_naive attaches the reader's offset later,
-    # after every adapter and the extractor, so one layer decides what "no
-    # zone" means. The note this replaced claimed the UTC reading was never
-    # wrong by a day, which "2026-10-08T00:00:00" disproves.
+    # one HERE (see start_from_prose for why).
     check("no stated zone means no invented offset",
           start_from_prose("(Tuesday, September 8 at 4:30pm)", _ISSUE).endswith("16:30:00"),
           start_from_prose("(Tuesday, September 8 at 4:30pm)", _ISSUE))
@@ -2676,9 +2663,9 @@ def offline() -> None:
           start_from_prose("(Friday, January 8 at 6:00pm)",
                            "2026-12-20T00:00:00+00:00").startswith("2027-01-08"),
           start_from_prose("(Friday, January 8 at 6:00pm)", "2026-12-20T00:00:00+00:00"))
-    # _MAX_LEAD_DAYS below 365 is what makes the year unambiguous, so the two
-    # candidates can never both be in range. Asserted through the behaviour
-    # rather than the constant, since the constant alone proves nothing.
+    # _MAX_LEAD_DAYS below 365 is what makes the year unambiguous. Asserted
+    # through the behaviour rather than the constant, since the constant alone
+    # proves nothing.
     check("a date further ahead than a newsletter ever announces is refused",
           start_from_prose("(Saturday, August 31 at 5:30pm)",
                            "2024-01-01T00:00:00+00:00") == "", "")
@@ -2775,8 +2762,9 @@ def offline() -> None:
     section("models.Score - three axes, two of them rank")
     check("rank excludes cost, so a South Bay commute cannot demote all of SF",
           Score(fit=5, access_value=4, cost=99).rank == 20)
-    check("State.silences_sweeper covers all four terminal states",
-          all(State(s).silences_sweeper for s in ("saved", "registered", "dismissed", "expired"))
+    check("State.silences_sweeper covers every terminal state",
+          all(State(s).silences_sweeper
+              for s in ("saved", "registered", "dismissed", "expired", "sold_out"))
           and not State.NEW.silences_sweeper)
 
     section("config.build_sources - a held source must not be startable")
@@ -2833,14 +2821,14 @@ def offline() -> None:
           f"stale {sorted(_stale)}, contradicted {sorted(_contradicted)}. A renamed "
           f"adapter would otherwise fall out of its list without failing anything")
 
-    # The inverse, which an earlier review asked for and which was never
-    # added. That fix only corrected the one entry then claiming coverage,
-    # leaving nothing to stop the next one. build_sources reads six blocks of
-    # channels.yaml and cannot see the rest, while `verified` is exact-matched
-    # everywhere else in that file to mean "started", so the word inside an
-    # unread block claims coverage the pipeline does not have. The blocks are
-    # derived rather than listed, because a hardcoded list would go stale in
-    # precisely the direction that makes this pass vacuously.
+    # The inverse direction. An earlier fix only corrected the one entry then
+    # claiming coverage, leaving nothing to stop the next one. build_sources
+    # reads six blocks of channels.yaml and cannot see the rest, while
+    # `verified` is exact-matched everywhere else in that file to mean
+    # "started", so the word inside an unread block claims coverage the
+    # pipeline does not have. The blocks are derived rather than listed, because
+    # a hardcoded list would go stale in precisely the direction that makes this
+    # pass vacuously.
     read_blocks = {n.args[0].value for n in ast.walk(
         ast.parse((_pkg / "config.py").read_text(encoding="utf-8")))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
@@ -3024,8 +3012,7 @@ def offline() -> None:
             check("the query's state list still agrees with State.silences_sweeper",
                   sweepable == {"new", "seen"}, f"State now says {sorted(sweepable)}")
             # Concrete instance of the string-vs-instant bug expire_past's
-            # docstring measures (32 by text vs 22 by instant on the real
-            # ledger).
+            # docstring measures.
             noon_utc = "2026-09-09T18:00:00+00:00"
             evening = iso_or_empty("2026-09-09T17:30:00.000-07:00")
             db.upsert(_event(event_uid="tz", url="https://x/tz", start=evening))
@@ -3096,9 +3083,8 @@ def offline() -> None:
             check("a row stored before the gate existed still loads",
                   "legacy" in got, "reading the ledger raised or skipped it")
 
-            # One live run sent 3 of its 7 last calls to events first mailed
-            # the day before, all already inside the window when first mailed.
-            # Each case isolates one condition: the other one passes.
+            # The two WHEN conditions (see EventStore.due_for_resweep). Each
+            # case isolates one: the other passes.
             db.upsert(_event(event_uid="first-inside", url="https://x/first-inside",
                              start="2026-09-09T10:00:00+00:00"))
             db.mark_alerted(["first-inside"], at="2026-09-07T00:00:00+00:00")
@@ -3136,8 +3122,7 @@ def offline() -> None:
                   f"kept {sorted(survived)}, terminal states are "
                   f"{sorted(s.value for s in State if s.silences_sweeper)}")
             # Why "reported" keys on the URL, not event_uid: see
-            # EventStore.reported_urls. These two cases are why the store applies
-            # the digest floor itself: a below-floor row was recorded for audit
+            # EventStore.reported_urls. A below-floor row was recorded for audit
             # and never mailed, so counting it as reported would silently drop
             # the event once a richer source lifts the same URL over the floor.
             # Measured on a newsletter bare link, then the same URL from a
@@ -3160,9 +3145,9 @@ def offline() -> None:
             reported = db.reported_urls()
             check("once one source clears the floor, the URL counts as reported",
                   url in reported, f"reported holds {sorted(reported)}")
-            # The whole point of a sticky column. A later sighting that scores
-            # BELOW the floor must not erase the fact that it was already
-            # reported, or the next source to list the same URL sends it again.
+            # A later sighting that scores BELOW the floor must not erase the
+            # fact that it was already reported, or the next source to list the
+            # same URL sends it again.
             db.upsert(_event(event_uid=f"jsonld:{url}", url=url,
                              source_kind="jsonld"), Score(1, 1, 3))
             check("a later low score does not erase that the URL was reported",
@@ -4229,10 +4214,8 @@ def offline() -> None:
     check("and an entity in that name is decoded on the way in",
           entity_title.title == "Move & Release", f"got {entity_title.title!r}")
 
-    # The keyword-only run, which on a GitHub runner is every run made without
-    # OPENAI_API_KEY, since no llm_clis CLI exists there. build_runtime
-    # used to return NO extractor in that case, disabling this free path along
-    # with the model it never calls.
+    # The keyword-only run (see PageFactExtractor's class docstring for why the
+    # invoker is optional).
     def _extract_modelless(html, **kw):
         event = _event(event_uid="newsletter:https://luma.com/x",
                        url="https://luma.com/x", source_kind="newsletter",
@@ -4249,8 +4232,7 @@ def offline() -> None:
     # raises AttributeError and returns the same undated event either way: the
     # outcome is identical and only the log tells the two apart. Asserted on
     # the log for that reason, and because "extraction failed" is a lie about
-    # a run that has no extractor to fail with. Mutation testing is what
-    # exposed this: deleting the guard survived an outcome-only check.
+    # a run that has no extractor to fail with.
     _extract_log = logging.getLogger("eventscout.extract")
     _records: list[logging.LogRecord] = []
 
@@ -4802,8 +4784,6 @@ def offline() -> None:
                                  connect=lambda: _Rich("ok")).fetch()[0]
         return _passes_gate(event, _settings)
 
-    # Derived, not a magic number: `far` only tests the prefix bound while it
-    # lands beyond it, so it has to move when the setting does.
     # Every fixture above carries ONE link, so nothing pinned what happens when
     # a message carries several: organizer and the body summary are per MESSAGE
     # and were hoisted out of the harvest loop, while the title is per link.
@@ -4916,6 +4896,8 @@ def offline() -> None:
           isinstance(other, list) and len(other) == 2, f"got {other}")
 
     near = _mail_with_term_at(600)
+    # Derived, not a magic number: `far` only tests the prefix bound while it
+    # lands beyond it, so it has to move when the setting does.
     far = _mail_with_term_at(_settings.keyword_match_prefix_chars + 1000)
     gate_cases = [
         ("a keyword in the body admits a mail with a generic subject",
