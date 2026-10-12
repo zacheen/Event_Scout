@@ -3949,6 +3949,8 @@ def offline() -> None:
         ("so is an East Bay one", "Pleasanton, CA", True),
         ("a qualified entry matches ', CA'", "Dublin, CA", True),
         ("and the spelled-out state", "Dublin, California", True),
+        ("and the spelled-out state with more text after it",
+         "Dublin, California - Library", True),
         ("and a full street address", "6600 Dublin Blvd, Dublin, CA 94568", True),
         ("a same-named city abroad is dropped", "Dublin, Ireland", False),
         ("whole-word matching keeps ', ca' from matching ', Canada'",
@@ -3965,13 +3967,13 @@ def offline() -> None:
         got = bay.keep(_event(source="other", location=loc,
                               attendance_mode=AttendanceMode.OFFLINE))
         check(why, got is want, f"{loc!r} kept={got}")
-    # Another reader's list, to show the state fold is no longer California's alone.
-    elsewhere =GeoFilter(("brooklyn, ny", "atlanta, georgia", "georgia tech"))
+    # Another reader's list, to show both state spellings work for any state.
+    elsewhere = GeoFilter(("brooklyn, ny", "atlanta, georgia", "georgia tech"))
     for why, loc, want in [
             ("an entry with a state code matches the spelled-out state",
              "Brooklyn, New York", True),
             ("an entry with the spelled-out state matches the code", "Atlanta, GA", True),
-            ("a state name opening a longer name is not folded",
+            ("a state name opening a longer name still matches its own entry",
              "Klaus Building, Georgia Tech", True),
             ("the same city in another state is still dropped", "Brooklyn, Michigan", False)]:
         got = elsewhere.keep(_event(source="other", location=loc,

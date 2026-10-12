@@ -51,27 +51,33 @@ _US_STATES = {
     "texas": "tx", "utah": "ut", "vermont": "vt", "virginia": "va", "washington": "wa",
     "west virginia": "wv", "wisconsin": "wi", "wyoming": "wy",
 }
-# A state name is folded only where it closes its comma segment. Folding it
-# anywhere would turn "Klaus Building, Georgia Tech" into ", ga tech", and an
-# entry "georgia tech" would stop matching its own campus. Over 263 distinct
-# ledger locations this folded the 4 spelled ", California" exactly as a
-# California-only `\b` rule did.
-_STATE_NAME = re.compile(
-    r", (" + "|".join(sorted(map(re.escape, _US_STATES), key=len, reverse=True))
-    + r")(?=\s*(?:$|[,.()\d]|usa\b|u\.s\.|united states\b))")
+_STATE_CODES = {code: name for name, code in _US_STATES.items()}
 
 
 def _normalise(location: str) -> str:
-    """Lower-cased, with a US state's full name folded to its code, so one
-    entry such as "dublin, ca" matches both spellings Luma emits within one
-    feed ("San Francisco, CA" and "San Francisco, California"). Applied to the
-    place entries too, so "brooklyn, new york" in channels.yaml works as well.
+    """Lower-cased, with whitespace and the space after each comma made uniform.
+
+    The location text is never rewritten beyond that, because folding a state's
+    name to its code turned "Klaus Building, Georgia Tech" into ", ga tech" and
+    cost the entry "georgia tech" its own campus, and folding only where the
+    name closed its comma segment missed "Dublin, California - Library". Both
+    spellings are matched from the entry's side instead (see _state_variants).
     """
     text = re.sub(r"\s+", " ", (location or "").lower())
     text = re.sub(r"\s*,\s*", ", ", text)
     # Stripped so a quoted entry such as "san jose " still compiles to a
     # pattern that can match.
-    return _STATE_NAME.sub(lambda m: f", {_US_STATES[m.group(1)]}", text).strip()
+    return text.strip()
+
+
+def _state_variants(entry: str) -> tuple[str, ...]:
+    """A normalised place entry, plus the same entry with its trailing US state
+    written the other way, so "dublin, ca" also matches "Dublin, California"."""
+    head, sep, tail = entry.rpartition(", ")
+    if not sep:
+        return (entry,)
+    other = _STATE_CODES.get(tail) or _US_STATES.get(tail)
+    return (entry, f"{head}, {other}") if other else (entry,)
 
 
 class GeoFilter:
@@ -107,7 +113,8 @@ class GeoFilter:
             raise ValueError("GeoFilter needs at least one place name and no blank or "
                              "non-string entry (channels.yaml geo.places)")
         self._place_patterns = tuple(
-            re.compile(rf"(?<![a-z]){re.escape(n)}(?![a-z])") for n in names)
+            re.compile(rf"(?<![a-z]){re.escape(v)}(?![a-z])")
+            for n in names for v in _state_variants(n))
         self._accept_virtual = accept_virtual
         self._regional_sources = regional_sources
         # Neither raises on its own. A zero or negative radius admits nothing,
