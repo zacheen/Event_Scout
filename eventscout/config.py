@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from .geo import GeoFilter
+from .preferences import ScoringPreferences, parse_preferences
 from .protocols import EventSource
 from .http import HostRateLimiter, HttpClient, UrllibHttpClient
 from .sources.eightfold import EightfoldSource
@@ -30,6 +31,24 @@ ROOT = Path(__file__).resolve().parent.parent
 #                      reads either -- that filter alone was observed withholding
 #                      all 70 JSON-LD events, which have no datePublished.
 FIRST_RUN_MODES = frozenset({"seed_plus_recent", "report_everything"})
+
+
+@dataclass(frozen=True)
+class CliTool:
+    """One scoring CLI from `llm_clis`, in the order the scorer tries them.
+
+    `args` carries the fixed flags only, because CliScorer appends the prompt as
+    the last argv element. A CLI whose prompt flag takes a value (`claude ... -p
+    <prompt>`) must end its args with that flag, and one taking the prompt
+    positionally (`codex exec <prompt>`) must not.
+    """
+
+    # The stem of the CONFIGURED cmd, fixed at load. LLM_CLIS, the digest footer
+    # and the score cache tag all key on it, so a path_env override pointing at
+    # "claude-wrapper.exe" must not rename the tool on one machine.
+    name: str
+    cmd: str  # executable name or full path, resolved through PATH by the scorer
+    args: tuple[str, ...]
 
 
 @dataclass
@@ -62,17 +81,19 @@ class Settings:
     gmail_read_user: str = ""
     gmail_read_password: str = ""
     gmail_read_labels: list[str] = field(default_factory=list)
-    # LLM tiering: API beats CLI beats keyword.
+    # LLM tiering: the API, then each llm_clis entry in order, then keyword.
     openai_api_key: str = ""
     model: str = "gpt-5.6"
     reasoning_effort: str = "medium"
-    gpt_cli: str = "codex"
-    gpt_cli_args: list[str] = field(default_factory=list)
+    llm_clis: list[CliTool] = field(default_factory=list)
     max_description_chars: int = 4000
     score_workers: int = 5
     request_timeout: int = 20
     user_agent: str = "event-scout/1.0"
     profile_text: str = ""
+    # None only for a Settings built by hand. load_settings always fills it,
+    # and the scorers refuse None rather than inventing a default.
+    preferences: ScoringPreferences | None = None
 
     @property
     def precedence_rank(self) -> dict[str, int]:
@@ -122,15 +143,89 @@ def load_settings(config_path: Path | None = None) -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         model=str(raw.get("model", "gpt-5.6")),
         reasoning_effort=str(raw.get("reasoning_effort", "") or ""),
-        # GPT_CLI may be a full path with spaces, so it overrides the bare name.
-        gpt_cli=os.getenv("GPT_CLI") or str(raw.get("gpt_cli", "codex")),
-        gpt_cli_args=[str(a) for a in raw.get("gpt_cli_args") or []],
+        llm_clis=_cli_tools(raw),
         max_description_chars=int(raw.get("max_description_chars", 4000)),
         score_workers=max(1, int(raw.get("score_workers", 5))),
         request_timeout=int(raw.get("request_timeout", 20)),
         user_agent=str(raw.get("user_agent", "event-scout/1.0")),
         profile_text=_profile_text(),
+        preferences=_preferences(raw),
     )
+
+
+def load_preferences(config_path: Path | None = None) -> ScoringPreferences:
+    """The scoring preferences alone, without reading the environment.
+
+    For callers that need the scorers but must not pick up this machine's
+    secrets or profile, such as a test building Settings by hand.
+    """
+    raw = yaml.safe_load((config_path or ROOT / "config.yaml").read_text(encoding="utf-8"))
+    return _preferences(raw)
+
+
+def _preferences(raw: dict) -> ScoringPreferences:
+    return parse_preferences(raw.get("event_preferences"), raw.get("fit_keywords"),
+                             raw.get("travel_cost"), raw.get("reason_language"))
+
+
+def _cli_tools(raw: dict) -> list[CliTool]:
+    """`llm_clis` in config order, which is the scorer's try order for the CLI
+    tier unless LLM_CLIS overrides it (see `_reorder_cli_tools`)."""
+    if "gpt_cli" in raw or "gpt_cli_args" in raw:
+        # A config still carrying the removed keys would otherwise load with
+        # llm_clis empty and quietly score the whole run keyword-only.
+        raise ValueError("config.yaml uses the removed 'gpt_cli'/'gpt_cli_args' keys; "
+                         "replace them with an ordered 'llm_clis' list")
+    tools = []
+    for entry in raw.get("llm_clis") or []:
+        if not isinstance(entry, dict):
+            # `- claude` with no keys would otherwise die on .get with an
+            # AttributeError naming neither the entry nor the file.
+            raise ValueError(f"llm_clis entry {entry!r} is not a mapping; each entry "
+                             "needs cmd and args, and optionally path_env")
+        cmd = entry.get("cmd")
+        if not cmd or not isinstance(cmd, str):
+            # An empty `cmd:` parses as None, which survives the frozen
+            # dataclass and only surfaces as a TypeError inside shutil.which,
+            # naming neither the entry nor the file.
+            raise ValueError(f"llm_clis entry {entry!r} has no usable 'cmd' ({cmd!r}); "
+                             "each entry needs a non-empty command name or path")
+        # path_env names an env var holding a full path, for a machine where the
+        # CLI is not on PATH. It may contain spaces, so it replaces cmd whole.
+        path_env = entry.get("path_env", "")
+        override = os.getenv(path_env, "").strip() if path_env else ""
+        args = entry.get("args", [])
+        if not isinstance(args, list):
+            # A scalar such as `args: exec` is iterable, so it would silently
+            # become ("e", "x", "e", "c") and every score would fail inside
+            # CliScorer, logged per event rather than as a config error.
+            raise ValueError(f"llm_clis entry {cmd!r} has non-list args "
+                             f"({type(args).__name__}); wrap even a single flag in [...]")
+        tools.append(CliTool(name=Path(cmd).stem, cmd=override or cmd,
+                             args=tuple(str(a) for a in args)))
+    return _reorder_cli_tools(tools)
+
+
+def _reorder_cli_tools(tools: list[CliTool]) -> list[CliTool]:
+    """LLM_CLIS overrides both the try order AND the membership of `llm_clis`.
+
+    Comma-separated CliTool names, best first. "claude,agy" tries claude and
+    falls back to agy, while "claude" alone leaves Claude as the only CLI.
+    Unset or blank keeps config order. It lives in the environment so switching
+    CLI is a .env edit rather than a commit to config.yaml.
+    """
+    wanted = [name for part in os.getenv("LLM_CLIS", "").split(",")
+              if (name := part.strip().lower())]
+    if not wanted:
+        return tools
+    by_name = {tool.name.lower(): tool for tool in tools}
+    if unknown := [name for name in wanted if name not in by_name]:
+        # Raised rather than skipped, because dropping the name would shrink the
+        # list toward empty and score the run keyword-only, and a typo in .env
+        # cannot be caught by reading config.yaml.
+        raise ValueError(f"LLM_CLIS names no llm_clis entry: {', '.join(unknown)}; "
+                         f"config.yaml defines {', '.join(sorted(by_name))}")
+    return [by_name[name] for name in wanted]
 
 
 def _check_policies(raw: dict, first: dict) -> None:

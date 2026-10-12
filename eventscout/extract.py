@@ -107,7 +107,7 @@ class PageFactExtractor:
     The invoker is OPTIONAL, and None is the keyword-only run rather than a
     broken one. build_runtime used to return no extractor at all in that case,
     which disabled the free schema.org path along with the model it does not
-    use -- on a GitHub runner, where the codex CLI does not exist, that is every
+    use -- on a GitHub runner, where no llm_clis CLI exists, that is every
     run made without OPENAI_API_KEY. With None the typed path still runs and
     only the prose path is skipped.
     """

@@ -42,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eventscout.config import (_parse_labels, build_geo, build_runtime, build_sources,
-                               load_channels,
+                               load_channels, load_preferences,
                                load_settings)
 from eventscout.geo import GeoFilter, _miles
 from eventscout.http import (HostRateLimiter, HttpClient, StubHttpClient,
@@ -52,7 +52,7 @@ from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
 from eventscout import notifier as notifier_module, pipeline, protocols
 from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
                                 _parse_score,
-                                KeywordScorer, OpenAiScorer)
+                                KeywordScorer, OpenAiScorer, ScoringPrompt)
 from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
                                  Digest, Funnel,
                                  _at_capacity, _bound_reason, _collapse, _deliver,
@@ -249,6 +249,7 @@ def offline() -> None:
     # EventSource entries below pass instances, not classes: `name` is set in
     # __init__ and invisible on the class (see _conformance's docstring).
     _stub = StubHttpClient({})
+    _prompt = ScoringPrompt.build(load_preferences(), "")
 
     class _stub_invoker:   # satisfies JsonInvoker without touching a model
         @staticmethod
@@ -298,8 +299,8 @@ def offline() -> None:
         # Extractor had NO implementation until this round, so the safety net
         # had never covered it once.
         (protocols.Extractor, PageFactExtractor(_stub_invoker, _stub), "PageFactExtractor"),
-        (protocols.JsonInvoker, CliScorer(["x"], ""), "CliScorer as JsonInvoker"),
-        (protocols.JsonInvoker, OpenAiScorer("k", "m", ""), "OpenAiScorer as JsonInvoker"),
+        (protocols.JsonInvoker, CliScorer(["x"], _prompt, name="x"), "CliScorer as JsonInvoker"),
+        (protocols.JsonInvoker, OpenAiScorer("k", "m", _prompt), "OpenAiScorer as JsonInvoker"),
         (protocols.EventFilter, GeoFilter, "GeoFilter"),
         (protocols.UrgencyEngine, DeadlineUrgency, "DeadlineUrgency"),
     ]
@@ -562,9 +563,9 @@ def offline() -> None:
             self.mailed += urls
             return len(urls)
 
-    # No API key and no CLI name resolves to the keyword tier (see
+    # No API key and an empty llm_clis resolve to the keyword tier (see
     # scoring._configured_tier), which is deterministic and free.
-    _offline = replace(load_settings(), openai_api_key="", gpt_cli="")
+    _offline = replace(load_settings(), openai_api_key="", llm_clis=[])
     _luma, _host = "https://luma.com/dup", "https://host.example/dup"
     with tempfile.TemporaryDirectory() as tmp_run:
         db = SqliteEventStore(Path(tmp_run) / "run.db")
@@ -3134,9 +3135,9 @@ def offline() -> None:
             both.close()
 
     section("scoring._bounded - a left boundary, and only a left one")
-    # See _bounded's docstring for the measured rationale (a trailing-space
-    # hack, since a two-sided pattern was tried and rejected).
-    _kw = KeywordScorer()
+    # See _bounded's docstring for the measured rationale, since a two-sided
+    # pattern was tried and rejected.
+    _kw = KeywordScorer(load_preferences())
 
     def _rank_of(text):
         return _kw.score(_event(title="Board game night", description=text,
@@ -3166,6 +3167,216 @@ def offline() -> None:
              "a hackneyed idea")]:
         check(why, _rank_of(text) > _base, "the collision is gone, so the "
               "docstring listing it as accepted is now wrong")
+
+    section("preferences - config.yaml is the only place a preference lives")
+    # See parse_preferences for why a gap fails the load instead of defaulting.
+    import copy
+    import os
+    from unittest import mock
+    from eventscout import scoring as _scoring_mod
+    from eventscout.config import Settings, _cli_tools
+    from eventscout.preferences import parse_preferences
+
+    _cfg_raw = yaml.safe_load(
+        (Path(__file__).resolve().parent / "config.yaml").read_text(encoding="utf-8"))
+    _pref_keys = ("event_preferences", "fit_keywords", "travel_cost", "reason_language")
+
+    def _prefs_with(mutate=lambda blocks: None):
+        blocks = {k: copy.deepcopy(_cfg_raw.get(k)) for k in _pref_keys}
+        mutate(blocks)
+        return parse_preferences(*(blocks[k] for k in _pref_keys))
+
+    _prefs = _prefs_with()
+    _levels = lambda b: b["event_preferences"]["describe"]
+    _access_kw = lambda b: b["event_preferences"]["keywords"]
+    for why, mutate in [
+            ("a missing event_preferences block",
+             lambda b: b.update(event_preferences=None)),
+            ("an access level left out", lambda b: _levels(b).pop(3)),
+            ("a sixth access level", lambda b: _levels(b).update({6: "more"})),
+            ("a quoted level key", lambda b: _levels(b).update({"5": _levels(b).pop(5)})),
+            ("a blank level text", lambda b: _levels(b).update({1: " "})),
+            ("a keyword weight above 5", lambda b: _access_kw(b).update(resume=6)),
+            ("a keyword weight of 0", lambda b: _access_kw(b).update(resume=0)),
+            ("a boolean keyword weight", lambda b: _access_kw(b).update(resume=True)),
+            ("an unknown key inside a block",
+             lambda b: b["event_preferences"].update(extra={})),
+            ("a positive fit penalty",
+             lambda b: b["fit_keywords"]["penalty"].update(poker=3)),
+            ("a place at a level travel_cost.describe never names",
+             lambda b: b["travel_cost"]["places"].update(fresno=7)),
+            ("a virtual cost of 0", lambda b: b["travel_cost"].update(virtual=0)),
+            ("a blank reason_language", lambda b: b.update(reason_language="  ")),
+            ("one term spelled twice once lowered",
+             lambda b: _access_kw(b).update({"Resume": 5}))]:
+        try:
+            _prefs_with(mutate)
+            check(f"{why} is refused at load", False, "accepted")
+        except ValueError:
+            check(f"{why} is refused at load", True)
+    try:
+        _scoring_mod.build_scorer(Settings())
+        check("a hand-built Settings with no preferences is refused by the scorer", False,
+              "built a scorer from preferences nobody supplied")
+    except ValueError:
+        check("a hand-built Settings with no preferences is refused by the scorer", True)
+
+    section("scoring.KeywordScorer - every weight comes from the preferences")
+    _hackathon = _event(title="An AI hackathon")
+    _shipped = KeywordScorer(_prefs).score(_hackathon).access_value
+    _keen = KeywordScorer(_prefs_with(lambda b: _access_kw(b).update(hack=5))).score(
+        _hackathon).access_value
+    check("the shipped hack weight of 2 doubles to access 4", _shipped == 4, f"got {_shipped}")
+    check("a reader who sets hack to 5 gets access 10, the top of the LLM scale",
+          _keen == 10, f"got {_keen}")
+    _named = KeywordScorer(_prefs).score(_event(title="Campus career night")).reason
+    _quiet = KeywordScorer(_prefs).score(_event(title="Fireside with founders")).reason
+    check("a level 4 term is named in the reason", "career" in _named, f"got {_named!r}")
+    check("a level 3 term is not", _quiet == "keywords: topic only", f"got {_quiet!r}")
+
+    def _cost_at(location, **kw):
+        return KeywordScorer(_prefs).score(_event(title="x", location=location, **kw)).cost
+
+    check("a listed place costs its level", _cost_at("Sunnyvale, CA") == 2,
+          f"got {_cost_at('Sunnyvale, CA')}")
+    check("a location naming two levels takes the cheaper one",
+          _cost_at("San Jose or San Francisco") == 2,
+          f"got {_cost_at('San Jose or San Francisco')}")
+    check("a location naming no listed place takes the default",
+          _cost_at("Fresno, CA") == 3, f"got {_cost_at('Fresno, CA')}")
+    check("a virtual event takes the virtual cost wherever it says it is",
+          _cost_at("San Francisco", attendance_mode=AttendanceMode.ONLINE) == 1,
+          f"got {_cost_at('San Francisco', attendance_mode=AttendanceMode.ONLINE)}")
+
+    section("scoring.ScoringPrompt - the frame carries no reader's preferences")
+    _neutral = parse_preferences(
+        {"describe": {n: f"level {n} text" for n in range(1, 6)}, "keywords": {}},
+        {"terms": {}, "penalty": {}},
+        {"virtual": 1, "default": 3, "describe": {2: "nearby"}, "places": {}},
+        "plain words")
+    _frame = ScoringPrompt.build(_neutral, "").system.lower()
+    _leaks = [w for w in ("career", "employer", "job", "resume", "hiring", "recruit",
+                          "hackathon", "northeastern", "bay", "san francisco", "chinese")
+              if w in _frame]
+    check("given preferences that never mention careers, the prompt does not either",
+          not _leaks, f"the frame itself says {_leaks}")
+    _full = ScoringPrompt.build(_prefs, "PROFILE TEXT").system
+    check("every access level reaches the prompt in its own line",
+          all(f"{n}  {_prefs.access_levels[n]}" in _full for n in range(1, 6)))
+    check("the eligibility cap reaches the prompt",
+          "Eligibility caps all of the above" in _full)
+    check("the travel levels and the default reach the prompt",
+          "1 virtual, 2 South Bay, 5 San Francisco or East Bay, 3 anywhere else" in _full,
+          _full[_full.find("cost:"):_full.find("cost:") + 120])
+    check("the reason language reaches the prompt", _prefs.reason_language in _full)
+    check("the profile closes the prompt", _full.endswith("The person:\nPROFILE TEXT"))
+
+    section("scoring.build_scorer - the cache tag follows what the model was told")
+
+    class _TagCache:
+        """Answers every lookup with a hit, so no model is called, and keeps the tag."""
+
+        def __init__(self):
+            self.tags = []
+
+        def get_cached_score(self, uid, tag):
+            self.tags.append(tag)
+            return Score(fit=1, access_value=1, cost=1, reason="r", method="cached")
+
+        def put_cached_score(self, uid, tag, score):
+            pass
+
+    def _tag(prefs=_prefs, profile="A", command=("C:/bin/claude.exe", "--model", "sonnet"),
+             name="claude"):
+        cache = _TagCache()
+        tier = CliScorer(list(command), ScoringPrompt.build(prefs, profile), name=name)
+        with mock.patch.object(_scoring_mod, "_configured_tier", return_value=tier):
+            _scoring_mod.build_scorer(Settings(preferences=prefs, profile_text=profile),
+                                      cache).score(_event())
+        return cache.tags[0]
+
+    _base_tag = _tag()
+    check("a new profile retires the old profile's scores", _tag(profile="B") != _base_tag)
+    check("a reworded access level retires the old scores",
+          _tag(prefs=_prefs_with(lambda b: _levels(b).update({5: "anything hiring"})))
+          != _base_tag)
+    check("a keyword-only edit keeps the LLM scores, since no model reads keywords",
+          _tag(prefs=_prefs_with(lambda b: _access_kw(b).update(hack=5))) == _base_tag)
+    check("another CLI does not reuse this one's scores", _tag(name="agy") != _base_tag)
+    check("a model pinned in the args reaches the tag",
+          _tag(command=("C:/bin/claude.exe", "--model", "opus")) != _base_tag)
+    check("the install path alone does not retire anything",
+          _tag(command=("D:/other/claude.exe", "--model", "sonnet")) == _base_tag)
+    _api_prompt = ScoringPrompt.build(_prefs, "")
+    check("the API tier's reasoning effort reaches the tag, as a CLI's args do",
+          OpenAiScorer("k", "m", _api_prompt, reasoning_effort="high").cache_scope
+          != OpenAiScorer("k", "m", _api_prompt, reasoning_effort="low").cache_scope)
+
+    section("config.llm_clis - try order, LLM_CLIS and refusals")
+    _clis = {"llm_clis": [{"cmd": "claude", "args": ["-p"]}, {"cmd": "agy", "args": ["-p"]},
+                          {"cmd": "codex", "args": ["exec"],
+                           "path_env": "EVENTSCOUT_CHECK_CODEX"}]}
+
+    def _names(env):
+        with mock.patch.dict(os.environ, env):
+            return [tool.name for tool in _cli_tools(_clis)]
+
+    check("config order is kept while LLM_CLIS is blank",
+          _names({"LLM_CLIS": ""}) == ["claude", "agy", "codex"], f"{_names({'LLM_CLIS': ''})}")
+    check("LLM_CLIS reorders the list and drops what it leaves out",
+          _names({"LLM_CLIS": "Codex, claude"}) == ["codex", "claude"],
+          f"{_names({'LLM_CLIS': 'Codex, claude'})}")
+    _wrapper = r"C:\Tools\codex-wrapper.exe"
+    with mock.patch.dict(os.environ, {"LLM_CLIS": "", "EVENTSCOUT_CHECK_CODEX": _wrapper}):
+        _codex = _cli_tools(_clis)[2]
+    check("path_env replaces cmd while the name stays the configured codex",
+          (_codex.cmd, _codex.name) == (_wrapper, "codex"), f"{(_codex.cmd, _codex.name)}")
+    check("so LLM_CLIS still finds an overridden CLI by its configured name",
+          _names({"LLM_CLIS": "codex", "EVENTSCOUT_CHECK_CODEX": _wrapper}) == ["codex"])
+    for why, raw, env in [
+            ("an LLM_CLIS name config.yaml does not define", _clis, {"LLM_CLIS": "claud"}),
+            ("an entry with an empty cmd", {"llm_clis": [{"cmd": ""}]}, {"LLM_CLIS": ""}),
+            ("an entry that is a bare name, not a mapping",
+             {"llm_clis": ["claude"]}, {"LLM_CLIS": ""}),
+            ("an entry whose args are a bare string",
+             {"llm_clis": [{"cmd": "codex", "args": "exec"}]}, {"LLM_CLIS": ""}),
+            ("the removed gpt_cli key", {"gpt_cli": "codex"}, {"LLM_CLIS": ""})]:
+        try:
+            with mock.patch.dict(os.environ, env):
+                _cli_tools(raw)
+            check(f"{why} is refused at load", False, "accepted")
+        except ValueError:
+            check(f"{why} is refused at load", True)
+
+    with mock.patch.dict(os.environ, {"LLM_CLIS": ""}):
+        _tools = _cli_tools(_clis)
+        _shipped_clis = {tool.name: list(tool.args) for tool in _cli_tools(_cfg_raw)}
+    _bare_prompt = ScoringPrompt.build(_prefs, "")
+    _installed = {"agy": "C:/bin/agy.exe", "codex": "C:/bin/codex.exe"}
+    with mock.patch.object(_scoring_mod.shutil, "which", side_effect=_installed.get):
+        _picked = _scoring_mod._configured_tier(Settings(llm_clis=_tools), _bare_prompt)
+        _with_key = _scoring_mod._configured_tier(
+            Settings(openai_api_key="k", llm_clis=_tools), _bare_prompt)
+    with mock.patch.object(_scoring_mod.shutil, "which", return_value=None):
+        _none = _scoring_mod._configured_tier(Settings(llm_clis=_tools), _bare_prompt)
+    check("the first INSTALLED entry scores, skipping one that is missing",
+          _picked is not None and _picked.method_label == "CLI (agy)",
+          f"got {getattr(_picked, 'method_label', None)}")
+    check("an API key still outranks every CLI",
+          _with_key is not None and _with_key.method_label == "API")
+    check("no key and no installed CLI leaves the keyword tier", _none is None)
+
+    # Pinned because each one is what keeps scraped event text from steering a
+    # tool, and a reordered or dropped flag would still score normally.
+    _claude, _agy, _codex_args = (_shipped_clis.get(n, []) for n in ("claude", "agy", "codex"))
+    check("claude scores with every built-in tool removed, and -p still last",
+          "--tools" in _claude and _claude[_claude.index("--tools") + 1] == ""
+          and _claude[-1] == "-p", f"args {_claude}")
+    check("agy scores inside its sandbox", "--sandbox" in _agy, f"args {_agy}")
+    check("codex scores in a read-only sandbox",
+          "--sandbox" in _codex_args
+          and _codex_args[_codex_args.index("--sandbox") + 1] == "read-only",
+          f"args {_codex_args}")
 
     section("sources.wordpress._START_KEYS - the last resort needs an offset")
     # See _START_KEYS's own comment for the offset bug this ordering avoids
@@ -3755,7 +3966,7 @@ def offline() -> None:
           entity_title.title == "Move & Release", f"got {entity_title.title!r}")
 
     # The keyword-only run, which on a GitHub runner is every run made without
-    # OPENAI_API_KEY, since the codex CLI does not exist there. build_runtime
+    # OPENAI_API_KEY, since no llm_clis CLI exists there. build_runtime
     # used to return NO extractor in that case, disabling this free path along
     # with the model it never calls.
     def _extract_modelless(html, **kw):

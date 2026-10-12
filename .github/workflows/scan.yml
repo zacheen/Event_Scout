@@ -48,7 +48,7 @@ jobs:
             exit 1
           fi
           if [ -z "$OPENAI_API_KEY" ]; then
-            echo "::notice::OPENAI_API_KEY not set. The codex CLI does not exist
+            echo "::notice::OPENAI_API_KEY not set. No llm_clis CLI exists
             on a runner, so scoring falls back to keywords and only the
             schema.org half of date extraction runs."
           fi

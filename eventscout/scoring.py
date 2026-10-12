@@ -3,18 +3,23 @@
 Three axes, never collapsed before the digest sees them.
 
   fit           topical relevance to the profile
-  access_value  does attending create a real pathway to a named employer
+  access_value  how much attending this KIND of event is worth to the reader
   cost          travel and time
 
 Only fit and access_value rank; see Score.rank for why cost is excluded rather
 than forgotten. The two axes are deliberately independent because they point in
 opposite directions often enough to matter. An employer resume-review event is
 low fit, because it reads as a generic resume workshop, and maximum access
-value, because that employer reads your resume for direct consideration. Rank
-on fit alone and exactly the events worth attending are the ones discarded.
+value for a reader who wants hiring channels, because that employer reads the
+resume for direct consideration. Rank on fit alone and exactly the events worth
+attending are the ones discarded.
 
-Three tiers, in precedence order: OpenAI API, else a local GPT CLI, else the
-deterministic keyword tier. Only the keyword tier is guaranteed available.
+What each axis rewards is config.yaml's to say (see preferences.py). This
+module holds only the rules that hold for any reader.
+
+Tiers, in precedence order: OpenAI API, else each `llm_clis` entry installed on
+this machine in config order, else the deterministic keyword tier. Only the
+keyword tier is guaranteed available.
 """
 from __future__ import annotations
 
@@ -27,37 +32,70 @@ import threading
 import subprocess
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import ClassVar
 
 from ._llm_json import lenient_json
 from .models import parse_iso, Event, Score, Urgency
+from .preferences import ACCESS_SCALE, ScoringPreferences
 from .protocols import EventScorer, JsonInvoker, ScoreCache
 
 log = logging.getLogger("eventscout.scoring")
 
-# Bump on ANY change to a prompt or rubric below. It is part of the score cache
-# key, so without it a reworded prompt keeps serving answers produced by the old
-# one: switching `reason` to Chinese changed nothing on screen at first, because
-# every event was a cache hit on a tag that only named the model.
-PROMPT_VERSION = "4"
+# Part of the score cache key. The system prompt is fingerprinted into the key
+# on its own (see ScoringPrompt), so bump this only for what the fingerprint
+# cannot see, which is _blob, _SCHEMA, the CLI's closing instruction and
+# _parse_score. A stale tag keeps serving answers to the old question.
+# Switching `reason` to Chinese once changed nothing on screen, because every
+# event was a cache hit on a tag that only named the model.
+PROMPT_VERSION = "5"
 
-# The rubric. Shared by the LLM prompt and mirrored by the keyword weights below,
-# so both tiers answer the same question rather than two similar ones.
-ACCESS_RUBRIC = """\
-5  an employer will see your materials or speak with you with hiring intent
-   (resume drop, direct consideration, career fair, on-site interview event)
-4  an employer or school career office runs it and staff are present to meet
-   (company info session, employer mixer, co-op advising session, campus recruiting)
-3  a named company hosts and its engineers attend, but there is no hiring channel
-2  industry people are present with no employer channel (hackathon, summit, meetup)
-1  social or purely academic (poker night, paper reading, film screening)
+# Holds for every reader, so it is not in config.yaml. Measured on five
+# tesla.com/event/*-resume links, one per university, which scored 80-90 alike
+# until this clause existed, so four of the five would have been mailed as if
+# the reader could attend them.
+_ELIGIBILITY_CAP = (
+    "Eligibility caps all of the above. An event restricted to another school's or "
+    "another program's members is a 1 no matter how well it matches the levels "
+    "above, because this person cannot attend it.")
 
-Eligibility caps all of the above. An event restricted to another school's or
-another program's members is a 1 no matter how strong its hiring intent, because
-the reader cannot attend it. Measured: five tesla.com/event/*-resume links, one
-per university, scored 80-90 alike until this clause existed, so four of the
-five would have been mailed to a Northeastern reader as if they were open."""
+
+@dataclass(frozen=True)
+class ScoringPrompt:
+    """The system prompt every LLM tier sends, the same for every event.
+
+    `fingerprint` goes into the score cache key, so any change to a preference,
+    the profile or this wording retires the scores judged against the old text.
+    """
+
+    system: str
+
+    @classmethod
+    def build(cls, preferences: ScoringPreferences, profile_text: str) -> "ScoringPrompt":
+        levels = "\n".join(f"{n}  {preferences.access_levels[n]}"
+                           for n in sorted(preferences.access_levels, reverse=True))
+        travel = preferences.travel
+        regions = "".join(f", {n} {travel.describe[n]}" for n in sorted(travel.describe))
+        return cls(
+            "You rate events for one person. Return three integers 1-10.\n\n"
+            "fit: topical relevance to their background and interests, as described "
+            "in the profile below.\n\n"
+            "access_value: how much attending this kind of event is worth to this "
+            "person, judged ONLY by the levels below, scaled to 1-10 by doubling. "
+            "This is INDEPENDENT of topic. Do not let fit leak into access_value.\n"
+            f"{levels}\n\n{_ELIGIBILITY_CAP}\n\n"
+            f"cost: burden of attending. {travel.virtual} virtual{regions}, "
+            f"{travel.default} anywhere else, higher if it spans multiple days.\n\n"
+            f"reason: ONE short sentence in {preferences.reason_language} naming the "
+            "deciding factor. That field only; the other three stay numbers. Keep "
+            "company and product names in their original spelling rather than "
+            "transliterating them.\n\n"
+            f"The person:\n{profile_text or '(no profile supplied)'}")
+
+    @property
+    def fingerprint(self) -> str:
+        return hashlib.sha256(self.system.encode("utf-8")).hexdigest()[:16]
 
 
 def _clamp(value, low: int = 1, high: int = 10) -> int:
@@ -73,53 +111,20 @@ def _clamp(value, low: int = 1, high: int = 10) -> int:
 # ---------------------------------------------------------------------------
 # Keyword tier
 # ---------------------------------------------------------------------------
-# ACCESS terms, matched as substrings rather than exact phrases. Exact-phrase
-# matching is what broke the first version: it looked for "career fair" while
-# real titles read "Career Symposium", "Campus to Career" and "Co-op 101", so
-# 65 of 70 events sat at the floor and the axis contributed nothing to ranking.
-_ACCESS_TERMS = {
-    # 5 - the employer actually receives your materials
-    "direct consideration": 5, "resume": 5, "career fair": 5, "careerfair": 5,
-    "hiring event": 5, "on-site interview": 5, "onsite interview": 5,
-    "job fair": 5, "recruiting event": 5,
-    # 4 - an employer or the career office is in the room
-    "career": 4, "co-op": 4, "coop": 4, "internship": 4, "intern ": 4,
-    "info session": 4, "information session": 4, "infosession": 4,
-    "recruit": 4, "employer": 4, "mixer": 4, "open house": 4, "symposium": 4,
-    "new grad": 4, "hiring": 4, "interview": 4,
-    # 3 - a named company hosts
-    "fireside": 3, "office hours": 3, "tech talk": 3, "speaker series": 3,
-    # 2 - industry present, no channel
-    "hack": 2, "summit": 2, "conference": 2, "meetup": 2, "workshop": 2,
-    "demo day": 2, "networking": 2,
-}
+_REASON_MIN_LEVEL = 4
 
-# FIT is topical relevance ONLY. Career words were previously in here, which put
-# their weight on the wrong axis: "Campus to Career" scored fit=2 access=1 when
-# it should be the reverse. Anything that signals an employer belongs above.
-_FIT_TERMS = {
-    "ai": 2, "machine learning": 3, "ml ": 2, "llm": 3, "agent": 2, "genai": 3,
-    "software": 3, "engineer": 3, "developer": 3, "data": 2, "robotics": 2,
-    "backend": 3, "frontend": 2, "infra": 2, "cloud": 2, "security": 2,
-    "computer science": 3, "research": 2, "startup": 1, "product": 1,
-}
-# Social filler that still appears on tech calendars. Damps fit rather than
-# excluding: a founder dinner is a weak lead, not a wrong one.
-_FIT_PENALTY = {"poker": -3, "chocolate": -3, "yoga": -3, "soccer": -3,
-                "karaoke": -3, "tasting": -3, "party": -2, "happy hour": -1}
 
-def _bounded(terms: dict[str, int]) -> list[tuple[str, "re.Pattern", int]]:
+def _bounded(terms) -> list[tuple[str, "re.Pattern", int]]:
     """(term, left-boundary pattern, weight) for each weighted term.
 
     A LEFT boundary ONLY. The right side stays open because prefix matching here
-    is deliberate and measured: the comment above _ACCESS_TERMS records that
-    exact-phrase matching left 65 of 70 events at the floor, and `recruit` has
-    to keep reaching "recruiting", `hack` "hackathon" and "hackday", `intern`
-    "internship". A two-sided `(?<![a-z0-9])kw s?(?![a-z0-9])` was
-    tried and rejected here: measured 2026-09-18 it broke all four of those.
-    So only the LEFT-side collisions are fixed: `resume` no longer matches
-    "presume", `hack` no longer matches "shack", and `ml ` (space stripped
-    above, so inert) no longer matches inside "html".
+    is deliberate and measured. Exact-phrase matching once left 65 of 70 events
+    at the access floor, and `recruit` has to keep reaching "recruiting",
+    `hack` "hackathon" and "hackday", `intern` "internship". A two-sided
+    `(?<![a-z0-9])kw s?(?![a-z0-9])` was tried and rejected here: measured
+    2026-09-18 it broke all four of those. So only the LEFT-side collisions are
+    fixed: `resume` no longer matches "presume", `hack` no longer matches
+    "shack", and `ml` no longer matches inside "html".
 
     Three RIGHT-side collisions are accepted, because no boundary can separate
     two continuations of one prefix. `intern` still reaches "internal",
@@ -132,22 +137,13 @@ def _bounded(terms: dict[str, int]) -> list[tuple[str, "re.Pattern", int]]:
             for t, w in terms.items() if t.strip()]
 
 
-_ACCESS_PATTERNS = _bounded(_ACCESS_TERMS)
-_FIT_PATTERNS = _bounded(_FIT_TERMS)
-_PENALTY_PATTERNS = _bounded(_FIT_PENALTY)
-
-_SOUTH_BAY = ("san jose", "santa clara", "sunnyvale", "mountain view",
-              "palo alto", "cupertino", "milpitas", "campbell", "los altos")
-_FAR_BAY = ("san francisco", "oakland", "berkeley", "emeryville", "alameda")
-
-
 class KeywordScorer:
     """Deterministic tier. No API key, no network, always available.
 
-    Cannot honour ACCESS_RUBRIC's eligibility cap. Substring matching cannot
-    tell "restricted to Georgia Tech students" from an open event, nor know
-    which school the reader attends, so a restricted resume drop still scores
-    access_value 5 here where the LLM tiers give it 1. Measured on five
+    Cannot honour the eligibility cap. Substring matching cannot tell
+    "restricted to Georgia Tech students" from an open event, nor know which
+    school the reader attends, so a restricted resume drop still scores
+    access_value 10 here where the LLM tiers give it 1. Measured on five
     tesla.com/event/*-resume links. Accepted only because this tier runs when
     neither LLM tier is reachable at all; the digest footer names the tier, so
     a reader can see which judgement they are getting.
@@ -158,32 +154,36 @@ class KeywordScorer:
     # save nothing, and would serve stale scores after a weight change.
     cacheable: ClassVar[bool] = False
 
+    def __init__(self, preferences: ScoringPreferences):
+        self._access = _bounded(preferences.access_keywords)
+        self._fit = _bounded(preferences.fit_terms)
+        self._penalty = _bounded(preferences.fit_penalty)
+        self._travel = preferences.travel
+
     def score(self, event: Event) -> Score:
         text = f"{event.title} {event.description} {event.organizer}".lower()
-        fit = sum(w for _, pat, w in _FIT_PATTERNS if pat.search(text))
-        fit += sum(w for _, pat, w in _PENALTY_PATTERNS if pat.search(text))
+        fit = sum(w for _, pat, w in self._fit if pat.search(text))
+        fit += sum(w for _, pat, w in self._penalty if pat.search(text))
         # MAX, not sum: one unambiguous signal ("resume") should not be diluted
         # by the absence of others, and stacking weak terms should not fake a 5.
-        access = max((w for _, pat, w in _ACCESS_PATTERNS if pat.search(text)),
-                     default=1)
-        hits = sorted({t for t, pat, w in _ACCESS_PATTERNS
-                       if w >= 4 and pat.search(text)})
-        return Score(fit=_clamp(fit), access_value=_clamp(access),
+        level = max((w for _, pat, w in self._access if pat.search(text)), default=1)
+        hits = sorted({t for t, pat, w in self._access
+                       if w >= _REASON_MIN_LEVEL and pat.search(text)})
+        # Doubled like the LLM tiers' access_value. Unscaled, this tier's rank
+        # topped out at 50 against their 100, so p0_min_rank 40 was out of
+        # reach for all but its highest fits.
+        return Score(fit=_clamp(fit), access_value=_clamp(level * ACCESS_SCALE),
                      cost=self._cost(event),
-                     reason=(f"關鍵字命中 {', '.join(hits[:3])}" if hits
-                             else "僅主題相關，未偵測到雇主管道"),
+                     reason=(f"keywords: {', '.join(hits[:3])}" if hits
+                             else "keywords: topic only"),
                      method=self.method_label)
 
-    @staticmethod
-    def _cost(event: Event) -> int:
+    def _cost(self, event: Event) -> int:
         if event.is_virtual:
-            return 1
+            return self._travel.virtual
         here = (event.location or "").lower()
-        if any(c in here for c in _SOUTH_BAY):
-            return 2
-        if any(c in here for c in _FAR_BAY):
-            return 5
-        return 3
+        return min((lvl for place, lvl in self._travel.places.items() if place in here),
+                   default=self._travel.default)
 
 
 # ---------------------------------------------------------------------------
@@ -259,33 +259,14 @@ class _LlmEventScorer(ABC):
     # that makes caching worthwhile.
     cacheable: ClassVar[bool] = True
 
-    def __init__(self, profile_text: str, max_description_chars: int = 4000):
-        self._profile = profile_text
+    def __init__(self, prompt: ScoringPrompt, max_description_chars: int = 4000):
+        self._prompt = prompt
         self._max_chars = max_description_chars
 
     def score(self, event: Event) -> Score:
         return _parse_score(
-            self.json_call(self._system(), self._blob(event), _SCHEMA, "event_scores"),
+            self.json_call(self._prompt.system, self._blob(event), _SCHEMA, "event_scores"),
             self.method_label)
-
-    def _system(self) -> str:
-        return (
-            "You rate career events for one job seeker. Return three integers 1-10.\n\n"
-            "fit: topical relevance to their background and target roles.\n\n"
-            "access_value: whether ATTENDING creates a real pathway to a named "
-            "employer. This is INDEPENDENT of topic. Use this rubric, scaled to 1-10 "
-            "by doubling:\n" + ACCESS_RUBRIC + "\n\n"
-            "A resume drop for one company is maximum access_value even if the topic "
-            "is dull. A fascinating AI hackathon with no company presence is low "
-            "access_value. Do not let fit leak into access_value.\n\n"
-            "cost: burden of attending. 1 virtual, 2 South Bay, 5 San Francisco or "
-            "East Bay, higher if it spans multiple days.\n\n"
-            "reason: ONE short sentence in TRADITIONAL CHINESE (zh-TW) naming "
-            "the deciding factor. That field only; the other three stay numbers. "
-            "Keep company and product names in their original spelling rather "
-            "than transliterating them.\n\n"
-            f"The person:\n{self._profile or '(no profile supplied)'}"
-        )
 
     def _blob(self, event: Event) -> str:
         # The url is included because it is sometimes the ONLY thing that
@@ -305,6 +286,13 @@ class _LlmEventScorer(ABC):
     @abstractmethod
     def method_label(self) -> str: ...
 
+    @property
+    @abstractmethod
+    def cache_scope(self) -> str:
+        """What this tier's answers depend on besides the prompt, as the head
+        of the score cache tag. Anything that changes the model belongs here."""
+        ...
+
     @abstractmethod
     def json_call(self, system_prompt: str, user_prompt: str,
                   schema: dict, schema_name: str) -> str:
@@ -317,16 +305,20 @@ class _LlmEventScorer(ABC):
 class OpenAiScorer(_LlmEventScorer):
     method_label = "API"
 
-    def __init__(self, api_key: str, model: str, profile_text: str,
+    def __init__(self, api_key: str, model: str, prompt: ScoringPrompt,
                  max_description_chars: int = 4000, reasoning_effort: str = "",
                  max_retries: int = 3):
-        super().__init__(profile_text, max_description_chars)
+        super().__init__(prompt, max_description_chars)
         self._api_key = api_key
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._max_retries = max_retries
         self._client = None
         self._client_lock = threading.Lock()
+
+    @property
+    def cache_scope(self) -> str:
+        return f"api:{self._model}:{self._reasoning_effort or 'default'}"
 
     def _client_instance(self):
         """The client, built once. Lazy so importing this module never needs
@@ -363,15 +355,29 @@ class OpenAiScorer(_LlmEventScorer):
 
 
 class CliScorer(_LlmEventScorer):
-    """Drives a local GPT CLI for users without an API key. Best effort."""
+    """Drives a local agent CLI for users without an API key. Best effort."""
 
-    method_label = "CLI"
-
-    def __init__(self, command: list[str], profile_text: str,
-                 max_description_chars: int = 4000, timeout: int = 180):
-        super().__init__(profile_text, max_description_chars)
+    def __init__(self, command: list[str], prompt: ScoringPrompt,
+                 max_description_chars: int = 4000, *, name: str, timeout: int = 180):
+        super().__init__(prompt, max_description_chars)
         self._command = command
+        self._name = name
         self._timeout = timeout
+
+    @property
+    def method_label(self) -> str:
+        """Which llm_clis entry won is a property of the machine, so without the
+        name a fall-through to the second entry would be invisible in the
+        digest footer and the ledger."""
+        return f"CLI ({self._name})"
+
+    @property
+    def cache_scope(self) -> str:
+        # The model is pinned inside the args, so they are hashed in. argv[0]
+        # is left out because it is this machine's install path, which changes
+        # nothing about the answer.
+        args = hashlib.sha256("\0".join(self._command[1:]).encode("utf-8")).hexdigest()[:12]
+        return f"cli:{self._name}-{args}"
 
     def json_call(self, system_prompt: str, user_prompt: str,
                   schema: dict, schema_name: str) -> str:
@@ -431,7 +437,14 @@ class CachingScorer:
         return score
 
 
-def _configured_tier(settings) -> "_LlmEventScorer | None":
+def _require_preferences(settings) -> ScoringPreferences:
+    if settings.preferences is None:
+        raise ValueError("Settings.preferences is unset. Build Settings with "
+                         "load_settings, or pass config.load_preferences() by hand")
+    return settings.preferences
+
+
+def _configured_tier(settings, prompt: ScoringPrompt) -> "_LlmEventScorer | None":
     """The one place that decides which model tier is available.
 
     Both build_scorer and build_invoker read it. They each used to carry their
@@ -440,12 +453,18 @@ def _configured_tier(settings) -> "_LlmEventScorer | None":
     two-copies-drift-apart failure this codebase has already hit twice.
     """
     if settings.openai_api_key:
-        return OpenAiScorer(settings.openai_api_key, settings.model,
-                            settings.profile_text, settings.max_description_chars,
-                            settings.reasoning_effort)
-    if settings.gpt_cli and shutil.which(settings.gpt_cli):
-        return CliScorer([shutil.which(settings.gpt_cli), *settings.gpt_cli_args],
-                         settings.profile_text, settings.max_description_chars)
+        return OpenAiScorer(settings.openai_api_key, settings.model, prompt,
+                            settings.max_description_chars, settings.reasoning_effort)
+    for tool in settings.llm_clis:
+        # which() both tests for the install and returns the full path used as
+        # argv[0]. CreateProcess appends only ".exe" to a bare name, so a CLI
+        # stored under any other extension is launchable solely by that path.
+        executable = shutil.which(tool.cmd)
+        if not executable:
+            log.info("scoring CLI %r not installed; trying the next llm_clis entry", tool.cmd)
+            continue
+        return CliScorer([executable, *tool.args], prompt,
+                         settings.max_description_chars, name=tool.name)
     return None
 
 
@@ -455,7 +474,10 @@ def build_invoker(settings) -> JsonInvoker | None:
     Returns the object, not a bound method, so the dependency is a declared
     Protocol rather than an untyped callable.
     """
-    return _configured_tier(settings)
+    # Never sent. The extractor passes its own prompts to json_call, and this
+    # one exists only because the tier constructors take one.
+    prompt = ScoringPrompt.build(_require_preferences(settings), settings.profile_text)
+    return _configured_tier(settings, prompt)
 
 
 def build_scorer(settings, store: ScoreCache | None = None) -> EventScorer:
@@ -465,24 +487,17 @@ def build_scorer(settings, store: ScoreCache | None = None) -> EventScorer:
     rather than decided by an early return here, so adding a fifth tier does not
     mean re-deriving that policy from the shape of this if/elif chain.
     """
-    llm = _configured_tier(settings)
+    preferences = _require_preferences(settings)
+    prompt = ScoringPrompt.build(preferences, settings.profile_text)
+    llm = _configured_tier(settings, prompt)
     tier: EventScorer
     if llm is None:
-        log.info("scorer: keyword-only fallback (no API key or GPT CLI found)")
-        tier, tag = KeywordScorer(), ""
+        log.info("scorer: keyword-only fallback (no API key or scoring CLI found)")
+        tier, tag = KeywordScorer(preferences), ""
     else:
         log.info("scorer: %s tier", llm.method_label)
-        tier = llm
-        # The API tier's answers depend on settings.model; the CLI tier's do
-        # not, because CliScorer never receives it (the model is pinned inside
-        # gpt_cli_args). Including it there would discard every cached CLI score
-        # whenever config.yaml's model changed, for no behavioural reason.
-        tag = (f"api:{settings.model}:p{PROMPT_VERSION}"
-               if llm.method_label == "API"
-               else f"cli:p{PROMPT_VERSION}")
-    if tag:
-        profile_hash = hashlib.sha256(settings.profile_text.encode("utf-8")).hexdigest()[:16]
-        tag += f":profile-{profile_hash}"
+        # The prompt fingerprint covers the profile, so the tag needs no profile term.
+        tier, tag = llm, f"{llm.cache_scope}:p{PROMPT_VERSION}:prompt-{prompt.fingerprint}"
     return CachingScorer(tier, store, tag) if store is not None and tier.cacheable else tier
 
 

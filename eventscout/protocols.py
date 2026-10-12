@@ -104,6 +104,11 @@ class JsonInvoker(Protocol):
 
 
 class EventScorer(Protocol):
+    # CliScorer and CachingScorer meet this with an instance property, since
+    # their label depends on which CLI or which wrapped tier they hold. Kept a
+    # ClassVar annotation because check.py's _conformance sees annotations and
+    # methods but not properties, so declaring a property here would stop it
+    # noticing an implementation with no label at all.
     method_label: ClassVar[str]
     # Whether wrapping this scorer in a cache pays for itself. False for a
     # cheap deterministic tier; see KeywordScorer.cacheable for why.

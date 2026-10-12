@@ -146,15 +146,18 @@ class PrivacyTests(unittest.TestCase):
                     config._profile_text()
 
     def test_new_profile_does_not_reuse_old_profile_scores(self):
-        inner = Mock(cacheable=True, method_label="API")
+        inner = Mock(cacheable=True, method_label="API", cache_scope="api:m")
         inner.score.side_effect = [Score(2, 3, 4), Score(8, 9, 4)]
         store = SqliteEventStore(":memory:")
         event = Event(event_uid="test", title="Career fair", url="https://example.test/event",
                       source="calendar", source_kind="jsonld")
+        preferences = config.load_preferences()
         try:
             with patch.object(scoring, "_configured_tier", return_value=inner):
-                first = scoring.build_scorer(config.Settings(profile_text="first profile"), store)
-                second = scoring.build_scorer(config.Settings(profile_text="approved profile"), store)
+                first = scoring.build_scorer(config.Settings(
+                    profile_text="first profile", preferences=preferences), store)
+                second = scoring.build_scorer(config.Settings(
+                    profile_text="approved profile", preferences=preferences), store)
                 self.assertEqual(first.score(event).fit, 2)
                 self.assertEqual(first.score(event).fit, 2)
                 self.assertEqual(second.score(event).fit, 8)

@@ -2,23 +2,174 @@
 # Source list lives in channels.yaml.
 
 # --- LLM -------------------------------------------------------------------
-# The scoring model, plus the local CLI that stands in for it. The CLI tier is
+# The scoring model, plus the local CLIs that stand in for it. The CLI tier is
 # what makes a run possible with no API key at all, so leaving OPENAI_API_KEY
 # unset degrades scoring rather than disabling it.
 model: "gpt-5.6"
 reasoning_effort: "medium"
-gpt_cli: "codex"
-# --skip-git-repo-check was required back when this project was not a git repo
-# and codex refused to run outside a trusted
-# directory, failing every score with exit 1. It is a git repo again now,
-# so the flag is redundant rather than required. Kept because
-# dropping it is an untested behaviour change. --sandbox read-only is belt and
-# braces, since scoring only ever needs to read the prompt.
-gpt_cli_args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only",
-               "-c", "model=gpt-5.6-luna", "-c", "model_reasoning_effort=low"]
-# One CLI worker is one subprocess, and they share your ChatGPT rate limit.
+# Tried in this order after the API, and the first one installed on this
+# machine scores the run. LLM_CLIS in .env reorders or narrows the list, and
+# path_env names a variable holding a full path for a CLI that is not on PATH.
+# The prompt is appended after args, so a CLI that takes it as the value of -p
+# ends its args with -p.
+#
+# Every entry is told to run without tools or with them fenced in, because the
+# prompt carries event descriptions scraped from the web and from mail.
+llm_clis:
+  # --safe-mode keeps this machine's CLAUDE.md, hooks and MCP servers out of a
+  # scoring call. --tools "" removes every built-in tool, since scoring needs
+  # none. It sits before -p because --tools takes a list and would swallow a
+  # prompt that followed it directly.
+  - cmd: "claude"
+    args: ["--model", "sonnet", "--safe-mode", "--no-session-persistence",
+           "--disable-slash-commands", "--tools", "", "-p"]
+    path_env: "CLAUDE_CLI"
+  - cmd: "agy"
+    args: ["--model", "gemini-3.8-flash-low", "--disable-slash-commands", "--sandbox", "-p"]
+    path_env: "AGY_CLI"
+  # --skip-git-repo-check was required back when this project was not a git
+  # repo and codex refused to run outside a trusted directory, failing every
+  # score with exit 1. It is a git repo again, but the scorer runs codex in
+  # whatever directory the run was started from, and dropping the flag is an
+  # untested behaviour change. --sandbox read-only lets a model-generated
+  # command read but never write.
+  - cmd: "codex"
+    args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only",
+           "-c", "model=gpt-5.6-luna", "-c", "model_reasoning_effort=low"]
+    path_env: "GPT_CLI"
+# One CLI worker is one subprocess, and they all share that CLI's rate limit.
 # Raising this clears a backlog faster but multiplies the concurrent load.
 score_workers: 5
+
+# --- Scoring preferences ---------------------------------------------------
+# Everything here describes one reader, so a different reader edits this
+# section and no code. The profile that `fit` is judged against is not here. It
+# comes from PROFILE_PATH or RESUME_TEXT in .env (see config._profile_text).
+#
+# event_preferences and travel_cost each have a `describe` half, the prose the
+# LLM tiers read, and a keyword half, the substrings the keyword tier matches
+# when no model is reachable. Edit both halves together or the two tiers start
+# answering different questions.
+
+# access_value, the worth of attending this KIND of event, independent of its
+# topic. Exactly five levels, doubled to 1-10 by both tiers, because the rank
+# thresholds below are tuned on that scale. Keyword weights use the same 1-5
+# levels, and an event takes the highest level any of its terms reaches.
+# Keywords match as word prefixes rather than exact phrases, so "hack" reaches
+# "hackathon". Exact-phrase matching once left 65 of 70 events at the floor,
+# because real titles read "Career Symposium", "Campus to Career" and "Co-op 101".
+event_preferences:
+  describe:
+    5: "an employer will see your materials or speak with you with hiring intent (resume drop, direct consideration, career fair, on-site interview event)"
+    4: "an employer or school career office runs it and staff are present to meet (company info session, employer mixer, co-op advising session, campus recruiting)"
+    3: "a named company hosts and its engineers attend, but there is no hiring channel"
+    2: "industry people are present with no employer channel (hackathon, summit, meetup)"
+    1: "social or purely academic (poker night, paper reading, film screening)"
+  keywords:
+    direct consideration: 5
+    resume: 5
+    career fair: 5
+    careerfair: 5
+    hiring event: 5
+    on-site interview: 5
+    onsite interview: 5
+    job fair: 5
+    recruiting event: 5
+    career: 4
+    co-op: 4
+    coop: 4
+    internship: 4
+    intern: 4
+    info session: 4
+    information session: 4
+    infosession: 4
+    recruit: 4
+    employer: 4
+    mixer: 4
+    open house: 4
+    symposium: 4
+    new grad: 4
+    hiring: 4
+    interview: 4
+    fireside: 3
+    office hours: 3
+    tech talk: 3
+    speaker series: 3
+    hack: 2
+    summit: 2
+    conference: 2
+    meetup: 2
+    workshop: 2
+    demo day: 2
+    networking: 2
+
+# fit, for the keyword tier only. The LLM tiers judge fit against the profile.
+# Topical terms ONLY. Career words were once in here, which put their weight on
+# the wrong axis, so "Campus to Career" scored fit 2 and access 1 when it should
+# be the reverse. Anything that signals the kind of event belongs above.
+# The penalty damps social filler that still appears on tech calendars rather
+# than excluding it, because a founder dinner is a weak lead, not a wrong one.
+fit_keywords:
+  terms:
+    ai: 2
+    machine learning: 3
+    ml: 2
+    llm: 3
+    agent: 2
+    genai: 3
+    software: 3
+    engineer: 3
+    developer: 3
+    data: 2
+    robotics: 2
+    backend: 3
+    frontend: 2
+    infra: 2
+    cloud: 2
+    security: 2
+    computer science: 3
+    research: 2
+    startup: 1
+    product: 1
+  penalty:
+    poker: -3
+    chocolate: -3
+    yoga: -3
+    soccer: -3
+    karaoke: -3
+    tasting: -3
+    party: -2
+    happy hour: -1
+
+# cost, the burden of getting there, 1-10. Shown in the digest and never
+# multiplied into the rank (see Score.rank). Each place maps to a level that
+# `describe` names for the LLM tiers. A location naming places at two levels
+# takes the cheaper one, and a location naming none takes `default`.
+travel_cost:
+  virtual: 1
+  default: 3
+  describe:
+    2: "South Bay"
+    5: "San Francisco or East Bay"
+  places:
+    san jose: 2
+    santa clara: 2
+    sunnyvale: 2
+    mountain view: 2
+    palo alto: 2
+    cupertino: 2
+    milpitas: 2
+    campbell: 2
+    los altos: 2
+    san francisco: 5
+    oakland: 5
+    berkeley: 5
+    emeryville: 5
+    alameda: 5
+
+# The language of the one-sentence reason each LLM score carries. The keyword
+# tier writes its own short English reason and ignores this.
+reason_language: "TRADITIONAL CHINESE (zh-TW)"
 
 # DO NOT add a minimum-length floor for descriptions. A floor around 400 chars
 # is the usual way to reject ATS marketing teasers, a pathology events do not

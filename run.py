@@ -6,8 +6,8 @@ the two environments differ in ways a flag cannot paper over.
                      local_run.py                run.py (cloud)
   ledger             local_events.db, kept       imported from a separate private
                      across runs on this disk    repository, exported back after
-  scorer             codex CLI, no API key       OpenAI API; codex does not exist
-                     needed                      on a GitHub runner
+  scorer             an llm_clis CLI, no API     OpenAI API; none of the CLIs
+                     key needed                  exists on a GitHub runner
   extraction         schema.org, then a model    schema.org only, unless
                      for the rest                OPENAI_API_KEY is set
   email              opt-in via --dry-run        always sends
@@ -52,8 +52,8 @@ def main() -> int:
         print(f"ERROR: missing secret(s): {', '.join(missing)}")
         return 1
     if not settings.openai_api_key:
-        print("NOTICE: OPENAI_API_KEY is not set. The codex CLI does not exist on "
-              "a runner, so scoring falls back to keywords and only the schema.org "
+        print("NOTICE: OPENAI_API_KEY is not set. No llm_clis CLI exists on a "
+              "runner, so scoring falls back to keywords and only the schema.org "
               "half of date extraction runs. Expect weaker ranking than a local run.")
 
     if DB.exists():

@@ -42,9 +42,16 @@ Six adapters cover every channel, so adding a site is usually a config entry rat
 
 Two axes, multiplied, giving `rank = fit * access_value` on a 1 to 100 scale.
 
-`fit` is topical relevance to the profile. `access_value` asks whether attending creates a real pathway to a named employer. The second axis is what separates a generic resume workshop from the same workshop where one company reviews resumes for direct consideration.
+`fit` is topical relevance to the reader's profile, set up under Running it. `access_value` is how much attending this kind of event is worth to the reader, judged apart from its topic. The shipped preferences reward hiring channels, which is what separates a generic resume workshop from the same workshop where one company reviews resumes for direct consideration. A reader who would rather go to hackathons raises that level instead.
 
-Three tiers run in precedence order. The OpenAI API is used when a key is present, otherwise a local `codex` CLI, otherwise a deterministic keyword tier. Only the keyword tier is always available, so a missing model never stops a run. A model that is present but failing is not replaced by the keyword tier. The events it fails to score are dropped for that run, and when every event fails the run exits with an error.
+What each axis rewards lives in the scoring preferences section of `config.yaml`, so a different reader changes no code.
+
+- `event_preferences` describes five access levels for the LLM tiers and gives the keyword tier a weight for each term. Both tiers double the level to reach 1 to 10.
+- `fit_keywords` gives the keyword tier its topical terms and penalties. The LLM tiers read the profile instead.
+- `travel_cost` sets the cost shown beside each event. It never enters the rank.
+- `reason_language` sets the language of the one-line reason each score carries.
+
+Three tiers run in precedence order. The OpenAI API is used when a key is present, otherwise the first CLI in `llm_clis` that is installed, otherwise a deterministic keyword tier. The list ships as `claude`, then `agy`, then `codex`, and `LLM_CLIS` in `.env` reorders or narrows it. Each CLI runs with its tools removed or sandboxed, because the prompt carries event text scraped from the web and from mail. Only the keyword tier is always available, so a missing model never stops a run. A model that is present but failing is not replaced by the keyword tier. The events it fails to score are dropped for that run, and when every event fails the run exits with an error.
 
 Rank decides three things. Whether the event reaches the digest at all, whether it is marked P0, P1 or P2, and whether it earns a last-call reminder before its date.
 
@@ -86,14 +93,14 @@ It prints `deployed` or `up to date`, and adding `--check` compares without writ
 | File | Holds |
 | --- | --- |
 | `channels.yaml` | The source inventory and the geography |
-| `config.yaml` | Keywords, score thresholds, horizon, delivery |
+| `config.yaml` | Scoring CLIs, scoring preferences, keywords, score thresholds, horizon, delivery |
 | `.env` | Every secret, and which mailbox and labels to read |
 
 Credentials and mailbox labels belong in `.env`, which is ignored by Git. Mailbox sources are named after their label and keep the sender's From header as the event's organizer, which scoring reads. Both stay in the local ledger and are stripped only when the cloud ledger is exported. The local database, profile and run logs remain private files. Share the tracked source files, never a ZIP of the entire working directory.
 
 LLM scoring sends the configured profile and event text to the selected model provider, including mailbox text when those events are scored. A CLI invocation does not make inference local. Use the keyword tier if that transfer is unwanted.
 
-`channels.yaml` is tuned for one reader, a Bay Area based student in US tech.
+The shipped `channels.yaml` is a worked example for one reader, a Bay Area based student in US tech, and a reader elsewhere replaces its sources and places.
 
 - The geo filter keeps an event whose location names one of the places under `geo.places`, which lists the cities within 50 miles of San Jose, Mountain View and Santa Clara, plus a few campuses. An event whose location names none of them but which carries coordinates, as Luma and Eventbrite events do, is judged by its distance from those three centres instead.
 - `geo.accept_virtual` only adds events back. With it on, an online event that names no Bay Area city passes, and so does any event whose location says remote only. An event naming a Bay Area city without saying remote only is kept either way.
