@@ -123,7 +123,8 @@ def main() -> int:
 
     have_creds = all((settings.gmail_user, settings.gmail_password, settings.mail_to))
     if dry_run or not have_creds:
-        notifier = ConsoleNotifier(settings.display_timezone)
+        notifier = ConsoleNotifier(settings.display_timezone,
+                                   long_running_days=settings.long_running_days)
         if not have_creds and not dry_run:
             print("GMAIL_USER / GMAIL_APP_PASSWORD / MAIL_TO not all set in .env -"
                   " printing the digest instead of sending it.")
@@ -132,7 +133,8 @@ def main() -> int:
         notifier = EmailNotifier(settings.gmail_user, settings.gmail_password,
                                  settings.mail_to,
                                  settings.display_timezone,
-                                 echo=show_digest)
+                                 echo=show_digest,
+                                 long_running_days=settings.long_running_days)
 
     print("=" * 68)
     if dry_run:

@@ -1228,7 +1228,7 @@ def offline() -> None:
 
     _shown_allday = format_digest(
         [("S", [(_allday, Score(fit=5, access_value=5, cost=2), Urgency.P2)])],
-        _pac, now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        _pac, now=datetime(2026, 9, 1, tzinfo=timezone.utc), long_running=timedelta(days=30))
     check("the digest prints the day and refuses to invent a clock time",
           "2026-10-08 (all day)" in _shown_allday and "00:00" not in _shown_allday
           and "2026-10-08 to" not in _shown_allday,
@@ -1447,11 +1447,10 @@ def offline() -> None:
             db.close()
     _span = timedelta(days=30)
     check("a window of exactly long_running_days counts as long running",
-          pipeline._runs_at_least(_event(start=_open_from,
-                                         end=(parse_iso(_open_from) + _span).isoformat()),
-                                  _span))
+          _event(start=_open_from,
+                 end=(parse_iso(_open_from) + _span).isoformat()).runs_at_least(_span))
     try:
-        _endless = pipeline._runs_at_least(_event(end="2026-11-08T09:00:00+00:00"), _span)
+        _endless = _event(end="2026-11-08T09:00:00+00:00").runs_at_least(_span)
         check("an event with an end but no start is not long running, rather than raising",
               _endless is False, f"got {_endless!r}")
     except Exception:
@@ -1477,7 +1476,7 @@ def offline() -> None:
 
     def _when_line(event):
         text = format_digest([("S", [(event, Score(fit=5, access_value=5, cost=2),
-                                      Urgency.P2)])], _lr_zone, now=_started_1h)
+                                      Urgency.P2)])], _lr_zone, now=_started_1h, long_running=timedelta(days=30))
         return next((ln for ln in text.splitlines() if "when:" in ln), "")
 
     for _w_label, _w_event, _w_ranged in [
@@ -1491,6 +1490,38 @@ def offline() -> None:
         _w_line = _when_line(_w_event)
         check(_w_label, (_w_ranged in _w_line) if _w_ranged else " to " not in _w_line,
               f"line {_w_line!r}")
+    for _l_label, _l_event, _l_want in [
+            ("a long listing not yet started is labelled (long_running_event)",
+             _event(start="2026-11-05T16:00:00+00:00", end="2027-01-01T08:00:00+00:00"), True),
+            ("and so is one under way",
+             _event(start="2026-01-30T13:00:00+00:00", end="2027-02-01T04:00:00+00:00"), True),
+            ("while an ordinary event is not",
+             _event(start="2026-10-09T01:00:00+00:00", end="2026-10-09T03:00:00+00:00"), False)]:
+        _l_line = _when_line(_l_event)
+        check(_l_label, ("(long_running_event)" in _l_line) is _l_want, f"line {_l_line!r}")
+
+    def _console_says(days):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ConsoleNotifier("America/Los_Angeles", long_running_days=days).send(
+                [("S", [(_event(start="2026-11-05T16:00:00+00:00",
+                                end="2027-01-01T08:00:00+00:00"),
+                         Score(fit=5, access_value=5, cost=2), Urgency.P2)])], "s")
+        return "(long_running_event)" in buf.getvalue()
+
+    check("the dry-run digest labels by the long_running_days it was built with",
+          _console_says(30) and not _console_says(100))
+    # Any other number would label different events from the ones the pipeline keeps.
+    for _entry in ("local_run.py", "run.py"):
+        _calls = [n for n in ast.walk(ast.parse(
+            (Path(__file__).parent / _entry).read_text(encoding="utf-8")))
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "id", "") in ("EmailNotifier", "ConsoleNotifier")]
+        _given = [ast.unparse(kw.value) for n in _calls for kw in n.keywords
+                  if kw.arg == "long_running_days"]
+        check(f"{_entry} builds every notifier with settings.long_running_days",
+              bool(_calls) and _given == ["settings.long_running_days"] * len(_calls),
+              f"{len(_calls)} notifiers, given {_given}")
 
     section("store.expire_past - the ledger and the digest agree on 'started'")
     # _bound_reason keeps a started event for _START_GRACE and expire_past used
@@ -1784,7 +1815,7 @@ def offline() -> None:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 EmailNotifier("u@example.test", "pw", "t@example.test",
-                              "America/Los_Angeles", echo=echo).send(
+                              "America/Los_Angeles", echo=echo, long_running_days=30).send(
                     _sections, "[Event Scout] 1 events", "footer text")
             mailed = _FakeSmtp.sent[0].get_body(("plain",)).get_content().strip()
             if echo:
@@ -1794,6 +1825,19 @@ def offline() -> None:
             else:
                 check("and without the flag a send prints nothing",
                       buf.getvalue() == "", f"printed {buf.getvalue()[:200]!r}")
+        # The window is about 57 days, between the two settings.
+        _long = [("OTHER PICKS", [(_event(title="Open", start="2026-11-05T16:00:00+00:00",
+                                          end="2027-01-01T08:00:00+00:00"),
+                                   Score(fit=5, access_value=5, cost=2), Urgency.P1)])]
+        _labelled = {}
+        for _days in (30, 100):
+            _FakeSmtp.sent.clear()
+            EmailNotifier("u@example.test", "pw", "t@example.test", "America/Los_Angeles",
+                          long_running_days=_days).send(_long, "[Event Scout] 1 events")
+            _labelled[_days] = "(long_running_event)" in (
+                _FakeSmtp.sent[0].get_body(("plain",)).get_content())
+        check("the mailed digest labels by the long_running_days the notifier was built with",
+              _labelled == {30: True, 100: False}, f"labelled {_labelled}")
     finally:
         notifier_module.smtplib.SMTP = real_smtp
     # Read from the source, like the main() checks below, because running
@@ -2308,7 +2352,7 @@ def offline() -> None:
         ev = _event(title="T", start=start, location="San Francisco, CA")
         body = format_digest([("S", [(ev, Score(fit=5, access_value=5, cost=2),
                                       Urgency.P2)])], _la,
-                             now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+                             now=datetime(2026, 9, 1, tzinfo=timezone.utc), long_running=timedelta(days=30))
         line = next(l for l in body.splitlines() if l.strip().startswith("when:"))
         return line.split("when:")[1].split("|")[0].split("(")[0].strip()
 
@@ -2335,7 +2379,7 @@ def offline() -> None:
     # scoring pass by the time a notifier is used.
     bad = False
     try:
-        ConsoleNotifier("Mars/Olympus_Mons")
+        ConsoleNotifier("Mars/Olympus_Mons", long_running_days=30)
     except Exception:
         bad = True
     check("an unknown display_timezone raises when the notifier is built",
@@ -3570,7 +3614,7 @@ def offline() -> None:
     check("and the digest shows the day it closes, not only the day it opened",
           "2026-02-11 to 2026-12-31 (all day)" in format_digest(
               [("S", [(_reg_stamped, Score(fit=5, access_value=5, cost=2), Urgency.P2)])],
-              _reg_zone, now=_reg_now))
+              _reg_zone, now=_reg_now, long_running=timedelta(days=30)))
     check("a long entry naming no registration, such as a conference booth, stays timed",
           _reg["c"].start == "2025-10-29T13:00:00+00:00" and not _reg["c"].rsvp_deadline
           and _reg["c"].attendance_mode is AttendanceMode.OFFLINE,

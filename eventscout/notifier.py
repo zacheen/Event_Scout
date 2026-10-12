@@ -102,7 +102,7 @@ def _lead_time(start: str, now: datetime) -> str:
 
 
 def format_digest(sections: list[Section], zone: ZoneInfo,
-                  now: datetime | None = None) -> str:
+                  now: datetime | None = None, *, long_running: timedelta) -> str:
     """Plain-text rendering shared by every notifier.
 
     A free function rather than a method: ConsoleNotifier previously reached
@@ -111,7 +111,9 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
 
     `zone` is required rather than defaulted, since the bug this guards
     against was exactly a time rendered in a zone nobody chose (see
-    display_zone).
+    display_zone). `long_running` is settings.long_running_days, required for
+    the same reason, since a default could label different events from the
+    ones the pipeline keeps whatever the geo filter says.
     """
     now = now or datetime.now(timezone.utc)
     blocks: list[str] = []
@@ -155,6 +157,12 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
                     when = f"{when} to {end.astimezone(zone).strftime('%Y-%m-%d %H:%M %Z')}"
             if lead:
                 when = f"{when} ({lead})"
+            # Marks every event long_running_days covers, kept whatever the geo
+            # filter says and past its start. A long one not yet started prints
+            # its start alone, so without the label neither the reader nor the
+            # scheduled run's check could tell it from an ordinary event.
+            if event.runs_at_least(long_running):
+                when = f"{when} (long_running_event)"
             where = event.location or ("online" if event.is_virtual else "location unknown")
             blocks.append(
                 f"[{urgency}] {event.title}\n"
@@ -169,13 +177,14 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
 class EmailNotifier:
     def __init__(self, user: str, app_password: str, mail_to: str,
                  timezone_name: str, host: str = "smtp.gmail.com",
-                 port: int = 587, echo: bool = False):
+                 port: int = 587, echo: bool = False, *, long_running_days: int):
         self._user = user
         self._app_password = app_password
         self._mail_to = mail_to
         # Resolved now so a bad name fails before a run does any work, rather
         # than after the fetch and the scoring have already been paid for.
         self._zone = display_zone(timezone_name)
+        self._long_running = timedelta(days=long_running_days)
         self._host = host
         self._port = port
         # Prints the body after a successful send. The same string that went
@@ -195,7 +204,7 @@ class EmailNotifier:
         message["Subject"] = subject
         message["From"] = self._user
         message["To"] = self._mail_to
-        body = format_digest(sections, self._zone)
+        body = format_digest(sections, self._zone, long_running=self._long_running)
         if footer:
             body += f"\n\n---\n{footer}\n"
         message.set_content(body)
@@ -221,13 +230,15 @@ class ConsoleNotifier:
     putting mail in the inbox while thresholds are still being tuned.
     """
 
-    def __init__(self, timezone_name: str):
+    def __init__(self, timezone_name: str, *, long_running_days: int):
         self._zone = display_zone(timezone_name)
+        self._long_running = timedelta(days=long_running_days)
 
     def send(self, sections: list[Section], subject: str, footer: str = "") -> int:
         total = sum(len(items) for _, items in sections)
         print(f"\n--- DRY RUN, no mail sent ---\nSubject: {subject}\n")
-        print(format_digest(sections, self._zone) or "(no events)")
+        print(format_digest(sections, self._zone, long_running=self._long_running)
+              or "(no events)")
         if footer:
             print(f"---\n{footer}")
         return total

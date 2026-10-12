@@ -319,7 +319,7 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     for e in deduped:
         if geo.keep(e):
             in_region.append(e)
-        elif _runs_at_least(e, long_running):
+        elif e.runs_at_least(long_running):
             in_region.append(e)
             unplaced += 1
     funnel.stage("after geo filter", len(in_region),
@@ -875,12 +875,6 @@ def _bound_reason(event: Event, now: datetime, horizon: datetime, *,
         if end is None or end - still_open <= now:
             return _STARTED
     return _TOO_FAR if when > horizon else None
-
-
-def _runs_at_least(event: Event, span: timedelta) -> bool:
-    start = parse_iso(event.start) if event.start else None
-    end = parse_iso(event.end) if event.end else None
-    return bool(start and end and end - start >= span)
 
 
 

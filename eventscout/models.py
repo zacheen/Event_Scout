@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, fields, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
@@ -214,6 +214,17 @@ class Event:
     @property
     def has_known_start(self) -> bool:
         return bool(self.start)
+
+    def runs_at_least(self, span: timedelta) -> bool:
+        """Whether the start-to-end window is `span` or longer.
+
+        Shared by the pipeline, which keeps such an event whatever the geo
+        filter says, and the digest, which labels it, so the label marks every
+        event the rule covers, even one the geo filter keeps anyway.
+        """
+        start = parse_iso(self.start) if self.start else None
+        end = parse_iso(self.end) if self.end else None
+        return bool(start and end and end - start >= span)
 
 
     def merged_with(self, other: "Event") -> "Event":

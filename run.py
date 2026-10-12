@@ -66,7 +66,8 @@ def main() -> int:
     sources, geo, extractor = build_runtime(settings, load_channels())
     notifier = EmailNotifier(settings.gmail_user, settings.gmail_password,
                              settings.mail_to,
-                             settings.display_timezone)
+                             settings.display_timezone,
+                             long_running_days=settings.long_running_days)
 
     failed = False
     try:
