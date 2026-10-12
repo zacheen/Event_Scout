@@ -13,8 +13,9 @@ reasoning_effort: "medium"
 # The prompt is appended after args, so a CLI that takes it as the value of -p
 # ends its args with -p.
 #
-# Every entry is told to run without tools or with them fenced in, because the
-# prompt carries event descriptions scraped from the web and from mail.
+# claude and codex run with every tool removed, because the prompt carries
+# event descriptions scraped from the web and from mail, and scoring needs no
+# tool at all. agy has no switch that does the same (see its entry).
 llm_clis:
   # --safe-mode keeps this machine's CLAUDE.md, hooks and MCP servers out of a
   # scoring call. --tools "" removes every built-in tool, since scoring needs
@@ -24,6 +25,12 @@ llm_clis:
     args: ["--model", "sonnet", "--safe-mode", "--no-session-persistence",
            "--disable-slash-commands", "--tools", "", "-p"]
     path_env: "CLAUDE_CLI"
+  # agy has no flag that removes its tools. With --sandbox it was measured
+  # reading and writing files, in its working directory and at an absolute
+  # path outside it, while failing to reach the network because headless mode
+  # refuses read_url. --mode plan changed none of that. Its permission rules
+  # live only in the global ~/.gemini/antigravity-cli/settings.json, which
+  # every other use of agy shares, so scoring leaves them alone.
   - cmd: "agy"
     args: ["--model", "gemini-3.8-flash-low", "--disable-slash-commands", "--sandbox", "-p"]
     path_env: "AGY_CLI"
@@ -31,10 +38,20 @@ llm_clis:
   # repo and codex refused to run outside a trusted directory, failing every
   # score with exit 1. It is a git repo again, but the scorer runs codex in
   # whatever directory the run was started from, and dropping the flag is an
-  # untested behaviour change. --sandbox read-only lets a model-generated
-  # command read but never write.
+  # untested behaviour change.
+  #
+  # --disable shell_tool is what removes file and network access. codex reads
+  # files and fetches URLs through its shell, and --sandbox read-only alone was
+  # measured on Windows letting it read a file and reach a local HTTP server.
+  # The other --disable flags and web_search="disabled" close its browser,
+  # computer, app, plugin and search tools, and --ignore-user-config keeps the
+  # plugins and MCP servers in ~/.codex/config.toml out of a scoring call.
   - cmd: "codex"
     args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only",
+           "--ignore-user-config", "--ephemeral",
+           "--disable", "shell_tool", "--disable", "unified_exec",
+           "--disable", "browser_use", "--disable", "computer_use",
+           "--disable", "apps", "--disable", "plugins", "-c", 'web_search="disabled"',
            "-c", "model=gpt-5.6-luna", "-c", "model_reasoning_effort=low"]
     path_env: "GPT_CLI"
 # One CLI worker is one subprocess, and they all share that CLI's rate limit.

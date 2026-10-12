@@ -3447,6 +3447,16 @@ def offline() -> None:
           "--sandbox" in _codex_args
           and _codex_args[_codex_args.index("--sandbox") + 1] == "read-only",
           f"args {_codex_args}")
+    # The read-only sandbox alone still let codex read files and reach the
+    # network on Windows, so the shell has to be off as well.
+    _codex_disabled = {_codex_args[i + 1] for i, a in enumerate(_codex_args[:-1])
+                       if a == "--disable"}
+    check("codex scores with its shell and every network-capable tool disabled",
+          {"shell_tool", "unified_exec", "browser_use", "computer_use", "apps",
+           "plugins"} <= _codex_disabled and 'web_search="disabled"' in _codex_args,
+          f"disabled {sorted(_codex_disabled)}")
+    check("and without the user config that carries plugins and MCP servers",
+          "--ignore-user-config" in _codex_args, f"args {_codex_args}")
 
     section("sources.wordpress._START_KEYS - the last resort needs an offset")
     # See _START_KEYS's own comment for the offset bug this ordering avoids
