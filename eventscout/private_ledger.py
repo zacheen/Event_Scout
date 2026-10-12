@@ -154,8 +154,11 @@ def main(argv: list[str] | None = None) -> int:
         token = os.getenv("LEDGER_TOKEN", "")
         remote = validate_repository(os.getenv("LEDGER_REPOSITORY", ""), token)
         (prepare if args[0] == "prepare" else save)(remote, token)
-    except Exception:
-        print("::error::Private ledger operation failed. Check private storage and token permissions.")
+    except Exception as exc:
+        # The class name only, since the message can carry the response body or
+        # the token. It still tells a token refusal from a failed push.
+        print(f"::error::Private ledger operation failed ({type(exc).__name__}). "
+              "Check private storage and token permissions.")
         return 1
     print("Private ledger operation completed.")
     return 0

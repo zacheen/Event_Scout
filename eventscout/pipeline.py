@@ -275,8 +275,13 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
             filled = _extract_all(extractor, thin, settings.score_workers)
             by_uid = {e.event_uid: e for e in filled}
             deduped = [by_uid.get(e.event_uid, e) for e in deduped]
-            got_date = sum(1 for e in deduped if e.start and e.event_uid in by_uid)
-            got_place = sum(1 for e in deduped if e.location and e.event_uid in by_uid)
+            # Against each item's own state before extraction. Thin means no
+            # start OR no location, so an item can arrive with one of the two,
+            # and counting what it holds afterwards credited extraction with it.
+            got_date = sum(1 for before, after in zip(thin, filled)
+                           if after.start and not before.start)
+            got_place = sum(1 for before, after in zip(thin, filled)
+                            if after.location and not before.location)
             funnel.stage("after extraction", len(deduped),
                          f"of {len(thin)} thin items: {got_date} gained a date, "
                          f"{got_place} a location")
@@ -333,8 +338,8 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
     # lookahead_days 120: of 150 in-region events 49 had already started and 0
     # sat beyond the horizon -- so a stage that looks over-filtered is nearly
     # always showing the day's own finished events, not a lookahead set too
-    # short. Counts in_region, i.e. AFTER extraction has filled thin items in
-    # (73 gained a date that run), so it cannot be reproduced from a raw fetch.
+    # short. Counts in_region, i.e. AFTER extraction has filled thin items in,
+    # so it cannot be reproduced from a raw fetch.
     #
     # Derived from _bound_reason rather than re-tested here, so the funnel's
     # explanation cannot drift from the filter (see its docstring for why).
@@ -635,7 +640,7 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
     #
     # The heading says what the ledger actually knows. It cannot say "you have
     # not acted on it": the only states that would prove otherwise are set by
-    # EventStore.set_state, which nothing but local_run.py --mark reaches, so
+    # EventStore.mark_by_url, which nothing but local_run.py --mark calls, so
     # for a reader who has never run that the claim would always be true by
     # construction and therefore meaningless.
     sections.append(

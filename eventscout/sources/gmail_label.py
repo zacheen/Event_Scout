@@ -18,16 +18,15 @@ from __future__ import annotations
 import email
 # Used below as email.utils.parsedate_to_datetime. `import email` alone
 # does NOT provide it; it resolves today only because email.message
-# pulls it in as a side effect, and the AttributeError from a changed
-# import order would be swallowed by the per-message except and read as
-# every FETCH failing.
+# pulls it in as a side effect, and a changed import order would raise
+# AttributeError on the first message and take every mailbox source down.
 import email.utils
 import imaplib
 import logging
 import re
 from contextlib import contextmanager
 from email.header import decode_header, make_header
-from typing import ClassVar, Sequence
+from typing import Callable, ClassVar, Sequence
 
 from ..models import Coverage, Event, iso_or_empty
 from ..urls import canon_url
@@ -38,6 +37,15 @@ log = logging.getLogger("eventscout.gmail")
 
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993
+# Seconds per socket operation, so a slow FETCH that keeps arriving is never cut
+# off. Without it a server that accepts and goes silent blocks fetch() with no
+# bound, and since run() fetches sources one after another, every source after
+# this one waits too.
+IMAP_TIMEOUT = 60
+
+
+def _open_gmail() -> imaplib.IMAP4_SSL:
+    return imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
 
 
 def _decode_header(value: str) -> str:
@@ -56,14 +64,29 @@ def _sender(message) -> str:
     return email.utils.parseaddr(message.get("From", ""))[1].strip().lower()
 
 
+def _sent_at(message) -> str:
+    """The Date header as ISO, or "" when it is missing or does not parse."""
+    raw = message.get("Date")
+    if not raw:
+        return ""
+    try:
+        return iso_or_empty(email.utils.parsedate_to_datetime(raw).isoformat())
+    except ValueError:
+        return ""
+
+
 class GmailLabelSource:
     kind: ClassVar[str] = "gmail_label"
 
     def __init__(self, name: str, user: str, app_password: str, label: str,
                  newer_than_days: int = 60, max_messages: int = 500,
                  body_chars: int = 4000, skip_from: str = "",
-                 link_hints: Sequence[str] | None = ()):
+                 link_hints: Sequence[str] | None = (), *,
+                 connect: Callable[[], imaplib.IMAP4_SSL] = _open_gmail):
         self.name = name
+        # The source's only way to the network, so a test hands in a fake
+        # mailbox here rather than replacing imaplib.IMAP4_SSL process-wide.
+        self._connect = connect
         self._link_hints = parse_link_hints(link_hints, name)
         self._user = user
         # Google prints app passwords in four groups of four; the spaces are
@@ -148,7 +171,7 @@ class GmailLabelSource:
     # -- IMAP plumbing -----------------------------------------------------
     @contextmanager
     def _mailbox(self):
-        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        imap = self._connect()
         try:
             imap.login(self._user, self._password)
             typ, data = imap.select(self._all_mail(imap), readonly=True)
@@ -230,23 +253,16 @@ class GmailLabelSource:
         differ for a debugger, no event link in the message and a skip_from
         match, and a skipped message usually has plenty of links.
         """
+        # Only the read is guarded, as in NewsletterArchiveSource. A Date
+        # header that failed to parse used to land in this except, so a
+        # readable message lost every link and counted toward the
+        # every-FETCH-failed guard.
         try:
             typ, data = imap.uid("FETCH", uid, "(BODY.PEEK[])")
             if typ != "OK" or not data or not isinstance(data[0], tuple):
                 log.warning("%s: FETCH failed for uid %s (%s)", self.name, uid, typ)
                 return None
             message = email.message_from_bytes(data[0][1])
-            if self._skip_from and _sender(message) == self._skip_from:
-                self._skipped_own += 1
-                # [] and NOT None: the message was read fine, but None is this
-                # method's "could not read it" signal, counted toward the
-                # every-FETCH-failed guard. A label of nothing but our own
-                # digests would then raise and take a working source down,
-                # instead of correctly contributing no events.
-                return []
-            subject = _decode_header(message.get("Subject", "")).strip()
-            sent = email.utils.parsedate_to_datetime(message.get("Date", ""))                 if message.get("Date") else None
-            body = self._body(message)
         except Exception as exc:
             # imap.uid does not only fail through `typ`. A socket error during
             # send() surfaces as IMAP4.abort and a malformed tagged response as
@@ -258,6 +274,17 @@ class GmailLabelSource:
             log.warning("%s: could not read uid %s (%s: %s)",
                         self.name, uid, type(exc).__name__, exc)
             return None
+        if self._skip_from and _sender(message) == self._skip_from:
+            self._skipped_own += 1
+            # [] and NOT None: the message was read fine, but None is this
+            # method's "could not read it" signal, counted toward the
+            # every-FETCH-failed guard. A label of nothing but our own
+            # digests would then raise and take a working source down,
+            # instead of correctly contributing no events.
+            return []
+        subject = _decode_header(message.get("Subject", "")).strip()
+        sent = _sent_at(message)
+        body = self._body(message)
         # Hoisted: both are the same for every link in this message, and
         # _summary strips the entire body each time it runs.
         # The From header, which both scoring tiers read. Kept in the live run
@@ -279,7 +306,7 @@ class GmailLabelSource:
                 description=description,
                 # The message date. Real, unlike the JSON-LD sources, so mailbox
                 # items qualify under first_run.require_known_publish_time.
-                published_at=iso_or_empty(sent.isoformat()) if sent else "",
+                published_at=sent,
             ))
         return out
 
@@ -316,6 +343,12 @@ class GmailLabelSource:
             except Exception:
                 continue
             if payload:
-                parts.append(payload.decode(part.get_content_charset() or "utf-8",
-                                            errors="replace"))
+                charset = part.get_content_charset() or "utf-8"
+                try:
+                    text = payload.decode(charset, errors="replace")
+                except LookupError:
+                    # errors="replace" covers bad bytes, not a charset name
+                    # Python does not know, such as unknown-8bit.
+                    text = payload.decode("utf-8", errors="replace")
+                parts.append(text)
         return "\n".join(parts)

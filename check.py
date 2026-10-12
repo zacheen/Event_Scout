@@ -349,7 +349,9 @@ def offline() -> None:
             ("extract.py", "self._http", HttpClient),
             ("sources/jsonld.py", "self._http", HttpClient),
             ("sources/wordpress.py", "self._http", HttpClient),
-            ("sources/newsletter.py", "self._http", HttpClient)):
+            ("sources/newsletter.py", "self._http", HttpClient),
+            ("sources/eightfold.py", "self._http", HttpClient),
+            ("sources/luma_discover.py", "self._http", HttpClient)):
         protos = proto if isinstance(proto, tuple) else (proto,)
         declared = set()
         for one in protos:
@@ -419,6 +421,23 @@ def offline() -> None:
                 rejected = True
             check(f"an unimplemented {key} is rejected, not ignored", rejected,
                   "it loaded, so the key documents a rule nothing enforces")
+        # Not policies, but they used to fail the same way: a value no code
+        # accepts loaded cleanly, then failed silently or after the fetch.
+        for key, before, after in [
+                ("keyword_gate_applies_to", 'keyword_gate_applies_to: ["gmail_label"]',
+                 'keyword_gate_applies_to: ["gmail_labels"]'),
+                ("unknown_time_max_urgency", 'unknown_time_max_urgency: "P1"',
+                 'unknown_time_max_urgency: "p1"')]:
+            check(f"config.yaml still sets {key} the way this check edits it",
+                  before in _raw_cfg, f"missing: {before}")
+            path.write_text(_raw_cfg.replace(before, after, 1), encoding="utf-8")
+            try:
+                load_settings(path)
+                refused = ""
+            except ValueError as exc:
+                refused = str(exc)
+            check(f"a {key} no code accepts is refused at load, naming the key",
+                  key in refused, refused or "it loaded")
         path.write_text(_raw_cfg, encoding="utf-8")
         try:
             load_settings(path)
@@ -1730,6 +1749,42 @@ def offline() -> None:
         finally:
             db.close()
 
+    # One thin item lacks only a place and one only a date, and the extractor
+    # dates the second. Counting what each holds after extraction reported
+    # 2 dates and 1 place gained.
+    class _Halves:
+        kind = name = "jsonld"
+
+        def fetch(self):
+            base = dict(source=self.kind, source_kind=self.kind, title=_RICH,
+                        description=_RICH, published_at="2026-09-19T00:00:00")
+            return [_event(event_uid="jsonld:https://luma.com/placeless",
+                           url="https://luma.com/placeless", start=_SOON, **base),
+                    _event(event_uid="jsonld:https://luma.com/undated",
+                           url="https://luma.com/undated", location="Palo Alto, CA",
+                           **base)]
+
+    class _DatesOnly:
+        def needs_extraction(self, event):
+            return not (event.start and event.location)
+
+        def extract(self, event):
+            return event if event.start else replace(event, start=_SOON)
+
+    with tempfile.TemporaryDirectory() as tmp_thin:
+        db = SqliteEventStore(Path(tmp_thin) / "thin.db")
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                run([_Halves()], db, build_geo(load_channels()), _offline, _Mailbox(),
+                    dry_run=True, now=_T0, extractor=_DatesOnly())
+        finally:
+            db.close()
+    _note = next((line for line in buf.getvalue().splitlines() if "thin items" in line), "")
+    check("the extraction note counts only what extraction added",
+          "of 2 thin items: 1 gained a date, 0 a location" in _note,
+          _note.strip() or "no extraction line was printed")
+
     # The rank is re-read at the sweep, so an event mailed once and since fallen
     # below the floor gets no LAST CALL, while one still above it does.
     with tempfile.TemporaryDirectory() as tmp_low:
@@ -1792,9 +1847,10 @@ def offline() -> None:
     # not a second rendering of the same sections.
     class _FakeSmtp:
         sent = []
+        timeouts = []
 
-        def __init__(self, host, port):
-            pass
+        def __init__(self, host, port, timeout=None):
+            _FakeSmtp.timeouts.append(timeout)
 
         def __enter__(self):
             return self
@@ -1845,6 +1901,9 @@ def offline() -> None:
                 _FakeSmtp.sent[0].get_body(("plain",)).get_content())
         check("the mailed digest labels by the long_running_days the notifier was built with",
               _labelled == {30: True, 100: False}, f"labelled {_labelled}")
+        check("every SMTP connection is opened with a timeout",
+              bool(_FakeSmtp.timeouts) and all(t and t > 0 for t in _FakeSmtp.timeouts),
+              f"timeouts {_FakeSmtp.timeouts}")
     finally:
         notifier_module.smtplib.SMTP = real_smtp
     # Read from the source, like the main() checks below, because running
@@ -1852,8 +1911,9 @@ def offline() -> None:
     _lr_main = next(n for n in ast.walk(ast.parse(
         (Path(__file__).parent / "local_run.py").read_text(encoding="utf-8")))
         if isinstance(n, ast.FunctionDef) and n.name == "main")
-    _flag_read = any(isinstance(n, ast.Compare) and isinstance(n.left, ast.Constant)
-                     and n.left.value == "--show-digest" for n in ast.walk(_lr_main))
+    import local_run
+    _flag_read = (local_run._parse(["--show-digest"]).show_digest
+                  and not local_run._parse([]).show_digest)
     _echo_kw = [kw.value for n in ast.walk(_lr_main)
                 if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "EmailNotifier"
                 for kw in n.keywords if kw.arg == "echo"]
@@ -1861,6 +1921,21 @@ def offline() -> None:
           _flag_read and len(_echo_kw) == 1 and isinstance(_echo_kw[0], ast.Name)
           and _echo_kw[0].id == "show_digest",
           f"flag read {_flag_read}, echo args {[ast.dump(v) for v in _echo_kw]}")
+
+    def _refused(argv):
+        """The code argparse exits with, or None when argv parsed."""
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                local_run._parse(argv)
+            except SystemExit as exc:
+                return exc.code
+        return None
+
+    check("local_run refuses a flag it does not know, so a typo cannot go live",
+          _refused(["--dryrun"]) == 2 and _refused(["--dry-run"]) is None,
+          f"--dryrun ended with {_refused(['--dryrun'])!r}")
+    check("and --mark needs both its state and its url",
+          _refused(["--mark", "saved"]) == 2)
 
     # "You have not acted on it" vs state 'new' is EventStore.due_for_resweep's
     # third condition -- both the below-floor and the absorbed-alias paths to
@@ -2509,7 +2584,7 @@ def offline() -> None:
             def mark(*argv):
                 # _mark explains itself on stdout; this file's output is the report.
                 with contextlib.redirect_stdout(io.StringIO()):
-                    return local_run._mark(["--mark", *argv])
+                    return local_run._mark(*argv)
 
             check("an unknown state is refused", mark("attended", url) == 2)
             check("a state the reader cannot choose is refused",
@@ -2705,6 +2780,10 @@ def offline() -> None:
           len(_kinds) >= 6 and not _unranked,
           f"kinds {sorted(_kinds)}, unranked {sorted(_unranked)}. _collapse sorts an "
           f"unranked kind last, so its typed fields lose to a mailbox copy")
+    check("config.SOURCE_KINDS, which keyword_gate_applies_to is checked against, "
+          "lists every adapter config.py imports",
+          _config_mod.SOURCE_KINDS == _kinds,
+          f"{sorted(_config_mod.SOURCE_KINDS)} vs {sorted(_kinds)}")
 
     # The same derivation for extract.py's two kind lists, which a new adapter
     # has to be sorted into by hand. Left out of _TYPED_START_KINDS, a model
@@ -3382,6 +3461,33 @@ def offline() -> None:
           OpenAiScorer("k", "m", _api_prompt, reasoning_effort="high").cache_scope
           != OpenAiScorer("k", "m", _api_prompt, reasoning_effort="low").cache_scope)
 
+    # The openai module is replaced rather than the client attribute, because
+    # _client_instance imports it lazily on the first call.
+    import types
+    from eventscout import scoring as _scoring_mod
+    _attempts, _sleeps = [], []
+
+    class _RefusingOpenAI:
+        def __init__(self, api_key):
+            self.chat = types.SimpleNamespace(completions=self)
+
+        def create(self, **request):
+            _attempts.append(request)
+            raise ConnectionError("refused")
+
+    _fake_openai = types.ModuleType("openai")
+    _fake_openai.OpenAI = _RefusingOpenAI
+    with mock.patch.dict(sys.modules, {"openai": _fake_openai}), \
+            mock.patch.object(_scoring_mod, "time", types.SimpleNamespace(sleep=_sleeps.append)):
+        try:
+            OpenAiScorer("k", "m", _api_prompt, max_retries=3).json_call("s", "u", {}, "n")
+            _gave_up = False
+        except RuntimeError:
+            _gave_up = True
+    check("the API tier gives up after its retries, with no sleep after the last",
+          _gave_up and len(_attempts) == 3 and _sleeps == [1, 2],
+          f"gave up {_gave_up}, {len(_attempts)} attempts, slept {_sleeps}")
+
     section("config.llm_clis - try order, LLM_CLIS and refusals")
     _clis = {"llm_clis": [{"cmd": "claude", "args": ["-p"]}, {"cmd": "agy", "args": ["-p"]},
                           {"cmd": "codex", "args": ["exec"],
@@ -3475,6 +3581,23 @@ def offline() -> None:
     _got = _wp_src.fetch()[0]
     check("so an item with only those two keys takes the UTC one",
           _got.start.startswith("2026-09-03T14:00:00"), f"start {_got.start!r}")
+
+    def _wp_start(raw):
+        """The start an epoch string becomes, or the error it raises."""
+        item = {"link": "https://wp.test/e", "title": {"rendered": "Career fair"},
+                "start_date_time": raw}
+        try:
+            return WordPressSource("wp", "http://wp/", StubHttpClient(
+                {"http://wp/?per_page=2&page=1": json.dumps([item])}), per_page=2
+                ).fetch()[0].start
+        except Exception as exc:
+            return f"{type(exc).__name__}: {exc}"
+
+    check("an epoch string in seconds becomes its instant",
+          _wp_start("1790967600").startswith("2026-10-02"), _wp_start("1790967600"))
+    _ms = _wp_start("1790967600000")
+    check("a millisecond epoch raises a ValueError naming the field",
+          _ms.startswith("ValueError") and "start" in _ms, _ms)
 
     section("sources.eightfold - the JSON list behind a script-rendered page")
     _ef_page = "https://acme.eightfold.ai/api/events/open/list?domain=acme.com&page="
@@ -4302,11 +4425,13 @@ def offline() -> None:
           _PromptRecorder.system[-80:])
     check("and the start read from it is kept",
           yearless.start == "2026-09-15T14:00:00-07:00", f"got {yearless.start!r}")
-    PageFactExtractor(_PromptRecorder(), _YearlessPage(),
-                      zone_name="America/Los_Angeles").extract(thin)
-    today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
-    check("an event with no publish date falls back to today as the reference",
-          f"reference date is {today}" in _PromptRecorder.system,
+    # 23:30 UTC is already the next day in Berlin, and still the same day in UTC
+    # and on a Pacific machine, so only the reader's zone gives the 13th.
+    PageFactExtractor(_PromptRecorder(), _YearlessPage(), zone_name="Europe/Berlin",
+                      now=lambda: datetime(2026, 10, 12, 23, 30, tzinfo=timezone.utc)
+                      ).extract(thin)
+    check("an event with no publish date falls back to the reader's today as the reference",
+          "reference date is 2026-10-13" in _PromptRecorder.system,
           _PromptRecorder.system[-80:])
     PageFactExtractor(_PromptRecorder(), _YearlessPage(),
                       zone_name="Europe/Berlin").extract(thin)
@@ -4526,7 +4651,6 @@ def offline() -> None:
         def close(self): pass
         def logout(self): pass
 
-    _real = _imaplib.IMAP4_SSL
     gmail_cases = [
         ("empty_label", "kept", "a label with no mail returns empty, not an error"),
         ("search_rejected", "raised", "a rejected SEARCH raises, never an empty list"),
@@ -4535,17 +4659,53 @@ def offline() -> None:
         ("fetch_all_abort", "raised", "every FETCH raising IMAP4.abort still raises"),
         ("fetch_one_abort", "kept", "ONE FETCH raising is tolerated, the rest continue"),
     ]
+    for mode, want, why in gmail_cases:
+        try:
+            GmailLabelSource("t", "u", "p", "L",
+                             connect=lambda _m=mode: _FakeImap(_m)).fetch()
+            got = "kept"
+        except RuntimeError:
+            got = "raised"
+        check(why, got == want, f"expected {want}, got {got}")
+
+    # Read fine, but with a Date that does not parse or a charset Python has no
+    # codec for. The first used to count as unreadable and lose its links, and
+    # narrowing that guard is what left the second able to escape fetch().
+    _ODD = {
+        b"1": (b"Subject: T\r\nDate: not a date at all\r\n"
+               b'Content-Type: text/html\r\n\r\n<a href="https://luma.com/baddate">E</a>'),
+        b"2": (b"Subject: T\r\nDate: Mon, 8 Sep 2026 10:00:00 -0700\r\n"
+               b"Content-Type: text/html; charset=unknown-8bit\r\n\r\n"
+               b'<a href="https://luma.com/oddcharset">E</a>'),
+    }
+
+    class _OddImap(_FakeImap):
+        def uid(self, cmd, *a):
+            if cmd == "SEARCH":
+                return ("OK", [b"1 2"])
+            return ("OK", [(b"1 (BODY[] {0}", _ODD[a[0]])])
+
     try:
-        for mode, want, why in gmail_cases:
-            _imaplib.IMAP4_SSL = lambda *a, _m=mode, **k: _FakeImap(_m)
-            try:
-                GmailLabelSource("t", "u", "p", "L").fetch()
-                got = "kept"
-            except RuntimeError:
-                got = "raised"
-            check(why, got == want, f"expected {want}, got {got}")
+        _odd = {e.url.rsplit("/", 1)[-1]: e for e in GmailLabelSource(
+            "t", "u", "p", "L", connect=lambda: _OddImap("ok")).fetch()}
+    except Exception as exc:
+        _odd = {"raised": f"{type(exc).__name__}: {exc}"}
+    check("a message whose Date does not parse keeps its links, undated",
+          "baddate" in _odd and _odd["baddate"].published_at == "", repr(_odd))
+    check("a message in a charset Python has no codec for keeps its links",
+          "oddcharset" in _odd, repr(_odd))
+
+    # The default connection is the one place left that needs the real class
+    # replaced, since what it passes to that class is what is under test.
+    _opened = []
+    _real = _imaplib.IMAP4_SSL
+    _imaplib.IMAP4_SSL = lambda *a, **k: _opened.append(k) or _FakeImap("ok")
+    try:
+        GmailLabelSource("t", "u", "p", "L").fetch()
     finally:
         _imaplib.IMAP4_SSL = _real
+    check("the mailbox is opened with a timeout",
+          bool(_opened) and (_opened[0].get("timeout") or 0) > 0, repr(_opened))
 
     # Regression for the gap _summary's docstring describes (measured before
     # body_chars existed): a generic subject alone starved the keyword gate.
@@ -4574,8 +4734,8 @@ def offline() -> None:
                     return ("OK", [b"1"])
                 return ("OK", [(b"1 (BODY[] {0}", message)])
 
-        _imaplib.IMAP4_SSL = lambda *a, **k: _Rich("ok")
-        event = GmailLabelSource("t", "u", "p", "L", body_chars=body_chars).fetch()[0]
+        event = GmailLabelSource("t", "u", "p", "L", body_chars=body_chars,
+                                 connect=lambda: _Rich("ok")).fetch()[0]
         return _passes_gate(event, _settings)
 
     # Derived, not a magic number: `far` only tests the prefix bound while it
@@ -4595,21 +4755,19 @@ def offline() -> None:
                 return ("OK", [b"1"])
             return ("OK", [(b"1 (BODY[] {0}", _two)])
 
-    _imaplib.IMAP4_SSL = lambda *a, **k: _TwoLinkImap("ok")
-    try:
-        pair = sorted(GmailLabelSource("t", "u", "p", "L").fetch(), key=lambda e: e.url)
-        check("one message yields one Event per link", len(pair) == 2, f"got {len(pair)}")
-        if len(pair) == 2:
-            one, two = pair
-            check("both links share the message's organizer and summary",
-                  one.organizer == two.organizer and one.description == two.description,
-                  f"{one.organizer!r} vs {two.organizer!r}")
-            check("each link keeps its own title", one.title != two.title,
-                  f"both titled {one.title!r}")
-            check("the summary carries the body, not just the subject",
-                  "career fair week" in one.description.lower(), one.description[:80])
-    finally:
-        _imaplib.IMAP4_SSL = _real
+    pair = sorted(GmailLabelSource("t", "u", "p", "L",
+                                   connect=lambda: _TwoLinkImap("ok")).fetch(),
+                  key=lambda e: e.url)
+    check("one message yields one Event per link", len(pair) == 2, f"got {len(pair)}")
+    if len(pair) == 2:
+        one, two = pair
+        check("both links share the message's organizer and summary",
+              one.organizer == two.organizer and one.description == two.description,
+              f"{one.organizer!r} vs {two.organizer!r}")
+        check("each link keeps its own title", one.title != two.title,
+              f"both titled {one.title!r}")
+        check("the summary carries the body, not just the subject",
+              "career fair week" in one.description.lower(), one.description[:80])
 
     # channels.yaml's event_link_hints have to reach the mailbox source through
     # build_sources, not only the newsletter one.
@@ -4668,54 +4826,48 @@ def offline() -> None:
         rather than the [FAIL] tally.
         """
         try:
-            return GmailLabelSource("t", "u", "p", "L", skip_from=skip_from).fetch()
+            return GmailLabelSource("t", "u", "p", "L", skip_from=skip_from,
+                                    connect=lambda: _OwnMailImap("ok")).fetch()
         except RuntimeError as exc:
             return f"raised {exc}"
 
-    _imaplib.IMAP4_SSL = lambda *a, **k: _OwnMailImap("ok")
-    try:
-        check("without skip_from the digest is harvested link by link",
-              _own_fetch("") == _own_fetch("") and len(_own_fetch("")) == 2,
-              "the fixture stopped producing two links, so the cases below "
-              "would pass for the wrong reason")
-        # Case matters: the address is compared lowercased, and a From header
-        # is free to capitalise it. An empty list is also asserted against a
-        # raise, because _events_in_message returns [] and not None for a skip
-        # so that a label of nothing but our own mail contributes no events
-        # rather than tripping the every-FETCH-failed guard.
-        for why, configured in [
-                ("skip_from drops mail sent from that address", "digest@example.com"),
-                ("the address match is case-insensitive", "Digest@Example.COM")]:
-            got = _own_fetch(configured)
-            check(why, got == [], f"got {got if isinstance(got, str) else len(got)}")
-        # The guard keys on the sender, not on the subject: a run's own counts
-        # build that subject, so it changes without anyone editing it.
-        other = _own_fetch("someone-else@example.com")
-        check("an unrelated skip_from leaves the message alone",
-              isinstance(other, list) and len(other) == 2, f"got {other}")
-    finally:
-        _imaplib.IMAP4_SSL = _real
+    check("without skip_from the digest is harvested link by link",
+          _own_fetch("") == _own_fetch("") and len(_own_fetch("")) == 2,
+          "the fixture stopped producing two links, so the cases below "
+          "would pass for the wrong reason")
+    # Case matters: the address is compared lowercased, and a From header
+    # is free to capitalise it. An empty list is also asserted against a
+    # raise, because _events_in_message returns [] and not None for a skip
+    # so that a label of nothing but our own mail contributes no events
+    # rather than tripping the every-FETCH-failed guard.
+    for why, configured in [
+            ("skip_from drops mail sent from that address", "digest@example.com"),
+            ("the address match is case-insensitive", "Digest@Example.COM")]:
+        got = _own_fetch(configured)
+        check(why, got == [], f"got {got if isinstance(got, str) else len(got)}")
+    # The guard keys on the sender, not on the subject: a run's own counts
+    # build that subject, so it changes without anyone editing it.
+    other = _own_fetch("someone-else@example.com")
+    check("an unrelated skip_from leaves the message alone",
+          isinstance(other, list) and len(other) == 2, f"got {other}")
 
     near = _mail_with_term_at(600)
     far = _mail_with_term_at(_settings.keyword_match_prefix_chars + 1000)
-    try:
-        gate_cases = [
-            ("a keyword in the body admits a mail with a generic subject",
-             near, _settings.max_description_chars, True),
-            ("the subject alone would have dropped it", near, 0, False),
-            ("body_chars bounds what the source hands on",
-             near, 100, False),
-            ("keyword_match_prefix_chars bounds what the gate reads, and it is "
-             "the stricter of the two", far, _settings.max_description_chars, False),
-        ]
-        for why, message, chars, want in gate_cases:
-            check(why, _gated(message, chars) is want,
-                  f"body_chars={chars}, expected gate {want}")
-    finally:
-        _imaplib.IMAP4_SSL = _real
+    gate_cases = [
+        ("a keyword in the body admits a mail with a generic subject",
+         near, _settings.max_description_chars, True),
+        ("the subject alone would have dropped it", near, 0, False),
+        ("body_chars bounds what the source hands on",
+         near, 100, False),
+        ("keyword_match_prefix_chars bounds what the gate reads, and it is "
+         "the stricter of the two", far, _settings.max_description_chars, False),
+    ]
+    for why, message, chars, want in gate_cases:
+        check(why, _gated(message, chars) is want,
+              f"body_chars={chars}, expected gate {want}")
 
     # Guards the import-order hazard gmail_label.py's own comment names,
-    # which would silently take all three configured mailbox sources dark
+    # which would take all three configured mailbox sources dark
     # at once (they share this one module-level import).
     _probe = subprocess.run(
         [sys.executable, "-c",
@@ -4858,20 +5010,17 @@ def offline() -> None:
           str(nl.coverage()) == "CAPPED, read 2 of 3 issues, 1 never seen",
           str(nl.coverage()))
 
-    _real_ssl = _imaplib.IMAP4_SSL
-    try:
-        _imaplib.IMAP4_SSL = lambda *a, **k: _FakeImap("ok")
-        gm = GmailLabelSource("t", "u", "p", "L", max_messages=2)
-        gm.fetch()
-        check("the mailbox cap is reported with both numbers",
-              str(gm.coverage()) == "CAPPED, read 2 of 3 messages, 1 never seen",
-              str(gm.coverage()))
-        gm = GmailLabelSource("t", "u", "p", "L", max_messages=99)
-        gm.fetch()
-        check("a mailbox under its cap reports nothing",
-              gm.coverage() is None, f"coverage {gm.coverage()}")
-    finally:
-        _imaplib.IMAP4_SSL = _real_ssl
+    gm = GmailLabelSource("t", "u", "p", "L", max_messages=2,
+                          connect=lambda: _FakeImap("ok"))
+    gm.fetch()
+    check("the mailbox cap is reported with both numbers",
+          str(gm.coverage()) == "CAPPED, read 2 of 3 messages, 1 never seen",
+          str(gm.coverage()))
+    gm = GmailLabelSource("t", "u", "p", "L", max_messages=99,
+                          connect=lambda: _FakeImap("ok"))
+    gm.fetch()
+    check("a mailbox under its cap reports nothing",
+          gm.coverage() is None, f"coverage {gm.coverage()}")
 
     raised = False
     try:

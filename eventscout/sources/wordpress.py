@@ -51,6 +51,10 @@ _MODE_BY_NAME = {
 
 _DESCRIPTION_MAX = 2000
 
+# 2100-01-01 UTC, EightfoldSource's bound. A millisecond epoch is a thousand
+# times the seconds for the same instant, so it lands above this.
+_EPOCH_CEILING = 4_102_444_800
+
 
 log = logging.getLogger("eventscout.wordpress")
 
@@ -142,8 +146,8 @@ class WordPressSource:
             url=url,
             source=self.name,
             source_kind=self.kind,
-            start=self._iso(self._first(item, _START_KEYS)),
-            end=self._iso(self._first(item, _END_KEYS)),
+            start=self._iso(self._first(item, _START_KEYS), "start"),
+            end=self._iso(self._first(item, _END_KEYS), "end"),
             location=self._first(item, _LOCATION_KEYS),
             description=strip_html(self._rendered(item.get("excerpt") or item.get("content")))[:_DESCRIPTION_MAX],
             attendance_mode=self._mode(item),
@@ -169,8 +173,7 @@ class WordPressSource:
                 return strip_html(str(value))
         return ""
 
-    @staticmethod
-    def _iso(value: str) -> str:
+    def _iso(self, value: str, field: str) -> str:
         """Normalise a WordPress date to ISO 8601.
 
         Event plugins store the start as a Unix epoch WRAPPED IN A STRING, e.g.
@@ -181,6 +184,11 @@ class WordPressSource:
         """
         text = (value or "").strip()
         if text.isdigit() and len(text) >= 9:
+            # Same bound and same loud failure as EightfoldSource._iso. Without
+            # it a millisecond epoch reached fromtimestamp, whose OSError on
+            # Windows named no field.
+            if int(text) >= _EPOCH_CEILING:
+                raise ValueError(f"{self.name}: {field} {text!r} is not epoch seconds")
             return datetime.fromtimestamp(int(text), timezone.utc).isoformat()
         return iso_or_empty(text)
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from .geo import GeoFilter
+from .models import Urgency
 from .preferences import ScoringPreferences, parse_preferences
 from .protocols import EventSource
 from .http import HostRateLimiter, HttpClient, UrllibHttpClient
@@ -31,6 +32,12 @@ ROOT = Path(__file__).resolve().parent.parent
 #                      reads either -- that filter alone was observed withholding
 #                      all 70 JSON-LD events, which have no datePublished.
 FIRST_RUN_MODES = frozenset({"seed_plus_recent", "report_everything"})
+
+# Every kind build_sources can start. keyword_gate_applies_to is checked against
+# it, because a misspelled kind leaves the gate applying to nothing.
+SOURCE_KINDS = frozenset(cls.kind for cls in (
+    EightfoldSource, GmailLabelSource, JsonLdSource, LumaDiscoverSource,
+    NewsletterArchiveSource, WordPressSource))
 
 
 @dataclass(frozen=True)
@@ -74,18 +81,21 @@ class Settings:
     # would state every time in one reader's zone.
     display_timezone: str = ""
     source_precedence: list[str] = field(default_factory=list)
-    gmail_user: str = ""
-    gmail_password: str = ""
-    mail_to: str = ""
+    # repr=False on every field read from the environment and on the profile,
+    # so a printed Settings or a failed assertion on one cannot put a password,
+    # a mailbox or the resume in a log.
+    gmail_user: str = field(default="", repr=False)
+    gmail_password: str = field(default="", repr=False)
+    mail_to: str = field(default="", repr=False)
     # The mailbox the gmail_label source READS, distinct from gmail_user above,
     # which is the account the digest is SENT FROM. Its labels are here rather
     # than in channels.yaml because a label name describes a private mailbox
     # and that file is published.
-    gmail_read_user: str = ""
-    gmail_read_password: str = ""
-    gmail_read_labels: list[str] = field(default_factory=list)
+    gmail_read_user: str = field(default="", repr=False)
+    gmail_read_password: str = field(default="", repr=False)
+    gmail_read_labels: list[str] = field(default_factory=list, repr=False)
     # LLM tiering: the API, then each llm_clis entry in order, then keyword.
-    openai_api_key: str = ""
+    openai_api_key: str = field(default="", repr=False)
     model: str = "gpt-5.6"
     reasoning_effort: str = "medium"
     llm_clis: list[CliTool] = field(default_factory=list)
@@ -93,7 +103,7 @@ class Settings:
     score_workers: int = 5
     request_timeout: int = 20
     user_agent: str = "event-scout/1.0"
-    profile_text: str = ""
+    profile_text: str = field(default="", repr=False)
     # None only for a Settings built by hand. load_settings always fills it,
     # and the scorers refuse None rather than inventing a default.
     preferences: ScoringPreferences | None = None
@@ -119,13 +129,24 @@ def load_settings(config_path: Path | None = None) -> Settings:
     if not isinstance(zone, str) or not zone.strip():
         raise ValueError("config.yaml display_timezone must name the reader's IANA zone, "
                          "such as America/Los_Angeles or Europe/Berlin")
+    gate_kinds = [str(k) for k in raw.get("keyword_gate_applies_to") or []]
+    stray = sorted(set(gate_kinds) - SOURCE_KINDS)
+    if stray:
+        raise ValueError(f"config.yaml keyword_gate_applies_to names no source kind: "
+                         f"{', '.join(stray)}; the kinds are {', '.join(sorted(SOURCE_KINDS))}")
+    # run() parses this too, but only after the fetch and the extraction have
+    # been paid for, and its error names the value rather than the key.
+    unknown_cap = str(raw.get("unknown_time_max_urgency", "P1"))
+    if unknown_cap not in {u.value for u in Urgency}:
+        raise ValueError(f"config.yaml unknown_time_max_urgency={unknown_cap!r} must be one "
+                         f"of {', '.join(u.value for u in Urgency)}")
     return Settings(
         keywords=[str(k).lower() for k in raw.get("keywords") or []],
         # Lowercased on load like keywords, so the comparison site does not
         # have to remember and a marker typed in capitals still matches.
         capacity_markers=[str(k).lower() for k in raw.get("capacity_markers") or []],
         min_hits=int(raw.get("min_hits", 1)),
-        keyword_gate_applies_to=list(raw.get("keyword_gate_applies_to") or []),
+        keyword_gate_applies_to=gate_kinds,
         keyword_match_prefix_chars=int(raw.get("keyword_match_prefix_chars", 2000)),
         lookahead_days=int(raw.get("lookahead_days", 30)),
         long_running_days=long_running_days,
@@ -134,7 +155,7 @@ def load_settings(config_path: Path | None = None) -> Settings:
         digest_min_rank=int(raw.get("digest_min_rank", 10)),
         p0_min_rank=int(raw.get("p0_min_rank", 40)),
         p1_min_rank=int(raw.get("p1_min_rank", 9)),
-        unknown_time_max_urgency=str(raw.get("unknown_time_max_urgency", "P1")),
+        unknown_time_max_urgency=unknown_cap,
         first_run_mode=str(first.get("mode", "seed_plus_recent")),
         seed_recent_days=int(first.get("recent_days", 3)),
         require_known_publish_time=bool(first.get("require_known_publish_time", True)),

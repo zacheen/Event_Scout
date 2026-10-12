@@ -350,7 +350,8 @@ class OpenAiScorer(_LlmEventScorer):
             except Exception as exc:
                 last = exc
                 log.warning("OpenAI scoring attempt %d failed: %s", attempt + 1, exc)
-                time.sleep(2 ** attempt)
+                if attempt + 1 < self._max_retries:
+                    time.sleep(2 ** attempt)
         raise RuntimeError(f"OpenAI scoring failed after {self._max_retries} attempts") from last
 
 

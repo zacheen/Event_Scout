@@ -23,6 +23,7 @@ import logging
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Callable
 from urllib.parse import urljoin
 
 from .http import HttpClient
@@ -112,15 +113,17 @@ class PageFactExtractor:
     only the prose path is skipped.
     """
 
-    def __init__(self, invoker: JsonInvoker | None, http: HttpClient, *, zone_name: str):
+    def __init__(self, invoker: JsonInvoker | None, http: HttpClient, *, zone_name: str,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self._invoker = invoker
         self._http = http
         # A page's unzoned time is read in the reader's display_timezone, as
         # _stamp_naive reads a source's. Checked here so a bad name fails at
         # build, not on the first page the model reads. Substituted with
         # replace() because the prompt's JSON braces rule out str.format.
-        display_zone(zone_name)
+        self._zone = display_zone(zone_name)
         self._system = _SYSTEM.replace("{zone}", zone_name)
+        self._now = now
 
     @property
     def prose_enabled(self) -> bool:
@@ -173,7 +176,9 @@ class PageFactExtractor:
         text = self._page_text(html)
         if not text:
             return event
-        today = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d")
+        # The reader's date, the zone the prompt reads unzoned times in. The
+        # machine's own zone put a UTC runner a day ahead every Pacific evening.
+        today = self._now().astimezone(self._zone).strftime("%Y-%m-%d")
         # A page stating "Sep 15" and "5:00 - 6:15 PM EST" with no year came back
         # with an empty start, because without the missing-year exception in
         # _SYSTEM the prompt forbids inferring any part of a date. An

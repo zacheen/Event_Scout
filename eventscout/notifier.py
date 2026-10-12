@@ -22,6 +22,11 @@ from zoneinfo import ZoneInfo
 from .models import display_zone, parse_iso, Event
 from .protocols import Section
 
+# Seconds per socket operation, not per send. Without it a server that accepts
+# the connection and then goes silent blocks send() with no bound, so the run
+# never finishes and never exits with an error either.
+SMTP_TIMEOUT = 30
+
 
 def _ics_stamp(value: str) -> str:
     when = parse_iso(value)
@@ -214,7 +219,7 @@ class EmailNotifier:
         if ics.count("BEGIN:VEVENT"):
             message.add_attachment(ics.encode("utf-8"), maintype="text",
                                    subtype="calendar", filename="event-scout.ics")
-        with smtplib.SMTP(self._host, self._port) as server:
+        with smtplib.SMTP(self._host, self._port, timeout=SMTP_TIMEOUT) as server:
             server.starttls(context=ssl.create_default_context())
             server.login(self._user, self._app_password)
             server.send_message(message)

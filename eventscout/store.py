@@ -293,7 +293,8 @@ class SqliteEventStore:
                 values + (event.event_uid, now))
 
     def set_state(self, event_uid: str, state: State) -> None:
-        # No production caller yet; see EventStore.set_state.
+        # No production caller, since the reader goes through mark_by_url; see
+        # EventStore.set_state.
         with self._lock:
             self._conn.execute("UPDATE events SET state=? WHERE event_uid=?",
                                (str(state), event_uid))

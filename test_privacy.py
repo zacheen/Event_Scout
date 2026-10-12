@@ -195,6 +195,17 @@ class PrivacyTests(unittest.TestCase):
                 contextlib.redirect_stdout(output):
             self.assertEqual(private_ledger.main(["save"]), 1)
         self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
+        self.assertIn("RuntimeError", output.getvalue())
+
+    def test_settings_repr_hides_secrets_mailboxes_and_profile(self):
+        hidden = dict(gmail_user="sender@example.test", gmail_password="smtp-secret",
+                      mail_to="reader@example.test", gmail_read_user="inbox@example.test",
+                      gmail_read_password="imap-secret", gmail_read_labels=["private-label"],
+                      openai_api_key="sk-secret", profile_text="resume body text")
+        shown = repr(config.Settings(display_timezone="America/Los_Angeles", **hidden))
+        self.assertIn("America/Los_Angeles", shown)
+        for value in hidden.values():
+            self.assertNotIn(value[0] if isinstance(value, list) else value, shown)
 
     def test_changed_remote_cannot_receive_ledger(self):
         result = subprocess.CompletedProcess([], 0, stdout="https://github.com/example/public.git\n")

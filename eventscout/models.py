@@ -104,7 +104,7 @@ _IDENTITY_FIELDS = frozenset({"event_uid", "title", "url", "source", "source_kin
 
 @dataclass(frozen=True)
 class Event:
-    # "{source}:{canonical-url}" — the dedupe key. Built by the adapter so a
+    # "{source_kind}:{canonical-url}" — the dedupe key. Built by the adapter so a
     # source with stable native ids can use them instead of the URL.
     event_uid: str
     title: str

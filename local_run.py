@@ -44,6 +44,7 @@ them the run still works, it just falls back to printing the digest.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -65,7 +66,22 @@ from eventscout.urls import canon_url
 DB = ROOT / "local_events.db"
 
 
-def _mark(argv: list[str]) -> int:
+def _parse(argv: list[str]) -> argparse.Namespace:
+    # parse_args, not a set of strings: an unknown flag must stop the run,
+    # because a typo such as --dryrun used to fall through to a live run that
+    # mails the digest and sets the three sticky ledger columns for good.
+    parser = argparse.ArgumentParser(
+        prog="local_run.py", description="Run the real pipeline locally.")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--all", action="store_true", dest="report_all")
+    parser.add_argument("--show-digest", action="store_true")
+    parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--no-extract", action="store_true")
+    parser.add_argument("--mark", nargs=2, metavar=("STATE", "URL"))
+    return parser.parse_args(argv)
+
+
+def _mark(state_name: str, raw_url: str) -> int:
     """Record what you did about one event, by URL.
 
     The ledger has carried SAVED / REGISTERED / DISMISSED since the beginning
@@ -75,12 +91,12 @@ def _mark(argv: list[str]) -> int:
     be friendlier and is a separate piece of work.
     """
     try:
-        state = State(argv[argv.index("--mark") + 1])
-        url = canon_url(argv[argv.index("--mark") + 2])
-    except (IndexError, ValueError):
+        state = State(state_name)
+    except ValueError:
         allowed = ", ".join(s.value for s in State if s.choosable)
         print(f"usage: local_run.py --mark <{allowed}> <event url>")
         return 2
+    url = canon_url(raw_url)
     if not state.choosable:
         print(f"--mark takes a state you can choose; {state.value} is not one")
         return 2
@@ -99,17 +115,17 @@ def _mark(argv: list[str]) -> int:
 
 
 def main() -> int:
-    args = set(sys.argv[1:])
-    dry_run = "--dry-run" in args
-    report_all = "--all" in args
-    show_digest = "--show-digest" in args
+    args = _parse(sys.argv[1:])
+    dry_run = args.dry_run
+    report_all = args.report_all
+    show_digest = args.show_digest
     if load_dotenv:
         load_dotenv(ROOT / ".env")
 
-    if "--mark" in args:
-        return _mark(sys.argv[1:])
+    if args.mark:
+        return _mark(*args.mark)
 
-    if "--reset" in args and DB.exists():
+    if args.reset and DB.exists():
         DB.unlink()
         print(f"removed {DB.name}; this run will seed from scratch")
 
@@ -117,7 +133,7 @@ def main() -> int:
     # Same assembly as run.py, so config.yaml's request_timeout and user_agent
     # cannot be honoured in one entry point and ignored in the other.
     sources, geo, extractor = build_runtime(settings, load_channels())
-    if "--no-extract" in args:
+    if args.no_extract:
         extractor = None
     store = SqliteEventStore(DB)
 

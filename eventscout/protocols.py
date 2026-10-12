@@ -212,13 +212,13 @@ class EventStore(ScoreCache, Protocol):
         ...
 
     def set_state(self, event_uid: str, state: State) -> None:
-        """Move an event into SAVED, REGISTERED or DISMISSED.
+        """Move one row, by uid, into SAVED, REGISTERED or DISMISSED.
 
-        Nothing in the pipeline calls this yet, so those three states are
-        currently unreachable outside check.py. Kept because expire_past and
-        due_for_resweep already treat them as first-class terminal states and
-        are tested on them; what is missing is a way for the reader to say so,
-        not the ledger's ability to record it.
+        No production code calls this. The reader reaches those states through
+        mark_by_url, which local_run.py --mark calls with the event's URL, the
+        only handle a reader has. Kept as the uid form tests use to put one row
+        into a terminal state, since expire_past and due_for_resweep treat all
+        three as first-class terminal states and are tested on them.
         """
         ...
 
@@ -278,9 +278,10 @@ class EventStore(ScoreCache, Protocol):
         one of them was measured putting the wrong events in front of the
         reader:
 
-        state not in State.silences_sweeper -- they already decided. Only
-            set_state reaches those states, so this condition does nothing
-            until the reader has a way to say so; local_run.py --mark is it.
+        state not in State.silences_sweeper -- they already decided. The
+            reader reaches those states only through mark_by_url, from
+            local_run.py --mark, so for a reader who never runs it this
+            condition does nothing.
         swept_at empty -- they have not had this nudge yet. Without it an
             hourly schedule sends one reminder per hour of the window.
         alerted_at set -- they were TOLD in the first place. state 'new' does
