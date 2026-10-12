@@ -97,7 +97,10 @@ class Settings:
     # LLM tiering: the API, then each llm_clis entry in order, then keyword.
     openai_api_key: str = field(default="", repr=False)
     model: str = "gpt-5.6"
-    reasoning_effort: str = "medium"
+    # "" as load_settings reads a config.yaml without the key, which sends no
+    # reasoning_effort at all. A different default here made a Settings built
+    # by hand ask the API for an effort the loaded one never sent.
+    reasoning_effort: str = ""
     llm_clis: list[CliTool] = field(default_factory=list)
     max_description_chars: int = 4000
     score_workers: int = 5

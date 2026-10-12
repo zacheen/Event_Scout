@@ -28,10 +28,10 @@ from urllib.parse import urljoin
 
 from .http import HttpClient
 from .protocols import JsonInvoker
-from .models import Event, display_zone, iso_or_empty
+from .models import AttendanceMode, Event, display_zone, iso_or_empty
 from ._llm_json import lenient_json
 from .sources._text import strip_html
-from .sources._jsonld import event_nodes, flatten_text, place_coordinates
+from .sources._jsonld import attendance_mode, event_nodes, flatten_text, place_coordinates
 from .urls import canon_url
 
 log = logging.getLogger("eventscout.extract")
@@ -289,6 +289,14 @@ class PageFactExtractor:
         coordinates = place_coordinates(node.get("location"))
         if coordinates:
             facts["coordinates"] = coordinates
+        # Read here as JsonLdSource reads it. Without it an online event
+        # reached through mail stayed UNKNOWN, and with a VirtualLocation that
+        # flattens to no location the geo filter dropped it despite
+        # accept_virtual. Left out when the page states none, so a mode the
+        # source typed is never erased.
+        mode = attendance_mode(node.get("eventAttendanceMode"))
+        if mode is not AttendanceMode.UNKNOWN:
+            facts["attendance_mode"] = mode
         title = PageFactExtractor._prose_title(node.get("name"), event.source_kind)
         if title:
             facts["title"] = title

@@ -70,8 +70,13 @@ def _sent_at(message) -> str:
     if not raw:
         return ""
     try:
-        return iso_or_empty(email.utils.parsedate_to_datetime(raw).isoformat())
-    except ValueError:
+        # str() because a Date carrying raw non-ASCII bytes comes back as a
+        # Header object, which parsedate_to_datetime cannot split.
+        return iso_or_empty(email.utils.parsedate_to_datetime(str(raw)).isoformat())
+    except Exception:
+        # Every failure, not only ValueError. The header is whatever a sender
+        # wrote, and an 11-digit year raises OverflowError instead. Missing it
+        # costs one message's date, while one escaping costs the whole label.
         return ""
 
 
@@ -346,9 +351,10 @@ class GmailLabelSource:
                 charset = part.get_content_charset() or "utf-8"
                 try:
                     text = payload.decode(charset, errors="replace")
-                except LookupError:
+                except (LookupError, UnicodeError):
                     # errors="replace" covers bad bytes, not a charset name
-                    # Python does not know, such as unknown-8bit.
+                    # Python does not know, such as unknown-8bit, nor a codec
+                    # such as idna that refuses "replace" with UnicodeError.
                     text = payload.decode("utf-8", errors="replace")
                 parts.append(text)
         return "\n".join(parts)

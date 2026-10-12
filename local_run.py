@@ -70,8 +70,11 @@ def _parse(argv: list[str]) -> argparse.Namespace:
     # parse_args, not a set of strings: an unknown flag must stop the run,
     # because a typo such as --dryrun used to fall through to a live run that
     # mails the digest and sets the three sticky ledger columns for good.
+    # allow_abbrev=False because argparse otherwise reads --re as --reset,
+    # which deletes the ledger.
     parser = argparse.ArgumentParser(
-        prog="local_run.py", description="Run the real pipeline locally.")
+        prog="local_run.py", description="Run the real pipeline locally.",
+        allow_abbrev=False)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--all", action="store_true", dest="report_all")
     parser.add_argument("--show-digest", action="store_true")
@@ -92,11 +95,12 @@ def _mark(state_name: str, raw_url: str) -> int:
     """
     try:
         state = State(state_name)
+        # Inside the try: a malformed URL such as http://[bad raises ValueError.
+        url = canon_url(raw_url)
     except ValueError:
         allowed = ", ".join(s.value for s in State if s.choosable)
         print(f"usage: local_run.py --mark <{allowed}> <event url>")
         return 2
-    url = canon_url(raw_url)
     if not state.choosable:
         print(f"--mark takes a state you can choose; {state.value} is not one")
         return 2

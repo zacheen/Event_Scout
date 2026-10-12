@@ -11,7 +11,7 @@ import re
 from html import unescape
 from typing import Iterator
 
-from ..models import coordinates_or_none
+from ..models import AttendanceMode, coordinates_or_none
 
 _LD_BLOCK = re.compile(
     r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', re.S | re.I
@@ -65,6 +65,22 @@ def flatten_text(value) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     return ""
+
+
+def attendance_mode(raw) -> AttendanceMode:
+    """Map a schema.org eventAttendanceMode URI onto the shared enum.
+
+    Kept out of AttendanceMode per its no-normalisation rule; matching the
+    URI tail is safe here since it's a controlled vocabulary, not free text.
+    """
+    tail = str(raw or "").rsplit("/", 1)[-1].lower()
+    if tail.startswith("online"):
+        return AttendanceMode.ONLINE
+    if tail.startswith("mixed"):
+        return AttendanceMode.MIXED
+    if tail.startswith("offline"):
+        return AttendanceMode.OFFLINE
+    return AttendanceMode.UNKNOWN
 
 
 def place_coordinates(location) -> tuple[float, float] | None:

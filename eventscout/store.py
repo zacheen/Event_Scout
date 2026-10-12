@@ -253,44 +253,40 @@ class SqliteEventStore:
         alert on it again every run.
         """
         now = _now()
-        values = (
-            event.url, event.title, event.organizer, event.start, event.end,
-            event.location, str(event.attendance_mode), event.description,
-            event.rsvp_deadline, event.published_at, event.source, event.source_kind,
-            score.fit if score else None,
-            score.access_value if score else None,
-            score.cost if score else None,
-            score.reason if score else "",
-            score.method if score else "",
-            str(urgency) if urgency else "",
-            keyword_hits, int(event.all_day), now,
-        )
-        # ONE lock around read, decide and write. Splitting them, as an earlier
-        # version did, leaves a check-then-act window: two threads can both see
-        # "not present" and both take the INSERT branch, and the second one dies
-        # on UNIQUE constraint failed. It never fired because upsert is called
-        # sequentially today, but the class docstring promises thread safety and
-        # this method was the one place not keeping that promise.
+        # Every column a sighting refreshes, keyed by name. The UPDATE, the
+        # INSERT and their values used to state these separately and bind them
+        # by position, and with every column TEXT or untyped a value one place
+        # out of order would have been stored in its neighbour without an error.
+        # state, first_seen and the sticky stamps are absent, so only the INSERT
+        # ever writes them.
+        refreshed = {
+            "canonical_url": event.url, "title": event.title,
+            "organizer": event.organizer, "start": event.start, "end_at": event.end,
+            "location": event.location, "attendance_mode": str(event.attendance_mode),
+            "description": event.description, "rsvp_deadline": event.rsvp_deadline,
+            "published_at": event.published_at, "source": event.source,
+            "source_kind": event.source_kind,
+            "fit": score.fit if score else None,
+            "access_value": score.access_value if score else None,
+            "cost": score.cost if score else None,
+            "reason": score.reason if score else "",
+            "score_method": score.method if score else "",
+            "urgency": str(urgency) if urgency else "",
+            "keyword_hits": keyword_hits, "all_day": int(event.all_day),
+            "last_seen": now,
+        }
+        columns = ", ".join(refreshed)
+        updates = ", ".join(f"{c}=excluded.{c}" for c in refreshed)
+        # One statement, so no thread can slip between a "not present" read and
+        # the INSERT and die on UNIQUE constraint failed, the window an earlier
+        # SELECT-then-write version left open. The lock stays because every
+        # method shares one connection.
         with self._lock:
-            existing = self._conn.execute(
-                "SELECT event_uid FROM events WHERE event_uid = ?",
-                (event.event_uid,)).fetchone()
-            if existing:
-                self._conn.execute(
-                    """UPDATE events SET canonical_url=?, title=?, organizer=?, start=?,
-                   end_at=?, location=?, attendance_mode=?, description=?,
-                   rsvp_deadline=?, published_at=?, source=?, source_kind=?,
-                   fit=?, access_value=?, cost=?, reason=?, score_method=?,
-                       urgency=?, keyword_hits=?, all_day=?, last_seen=?
-                       WHERE event_uid=?""", values + (event.event_uid,))
-                return
             self._conn.execute(
-                """INSERT INTO events (canonical_url, title, organizer, start, end_at,
-               location, attendance_mode, description, rsvp_deadline, published_at,
-               source, source_kind, fit, access_value, cost, reason, score_method,
-               urgency, keyword_hits, all_day, last_seen, event_uid, state, first_seen)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?)""",
-                values + (event.event_uid, now))
+                f"INSERT INTO events (event_uid, state, first_seen, {columns}) "
+                f"VALUES (?, 'new', ?, {', '.join('?' * len(refreshed))}) "
+                f"ON CONFLICT(event_uid) DO UPDATE SET {updates}",
+                (event.event_uid, now, *refreshed.values()))
 
     def set_state(self, event_uid: str, state: State) -> None:
         # No production caller, since the reader goes through mark_by_url; see

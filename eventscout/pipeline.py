@@ -35,7 +35,7 @@ class Digest:
     cleared: list[str]
     seeding: bool
     # What the rank floor rejected, carried only on a report_everything first
-    # run so the reader can see what the floor costs and make that cut himself.
+    # run so the reader can see what the floor costs and make that cut themselves.
     # Deliberately absent from `cleared` and from mark_alerted: showing an event
     # once in a dump of everything is not the same as judging it worth sending,
     # and marking it would both falsify that judgement and hand these to the
@@ -45,6 +45,12 @@ class Digest:
     # The run's clock, which mark_alerted stamps with so that due_for_resweep
     # compares alerted_at against the same clock on the next run.
     now: datetime
+
+    @property
+    def is_empty(self) -> bool:
+        """Nothing to mail. `cleared` does not count, since it can hold events
+        the seeding filter withheld."""
+        return not (self.to_send or self.reminders or self.below_floor)
 
 
 class AllSourcesFailedError(RuntimeError):
@@ -278,9 +284,9 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
             # Against each item's own state before extraction. Thin means no
             # start OR no location, so an item can arrive with one of the two,
             # and counting what it holds afterwards credited extraction with it.
-            got_date = sum(1 for before, after in zip(thin, filled)
+            got_date = sum(1 for before, after in zip(thin, filled, strict=True)
                            if after.start and not before.start)
-            got_place = sum(1 for before, after in zip(thin, filled)
+            got_place = sum(1 for before, after in zip(thin, filled, strict=True)
                             if after.location and not before.location)
             funnel.stage("after extraction", len(deduped),
                          f"of {len(thin)} thin items: {got_date} gained a date, "
@@ -580,9 +586,7 @@ def _start_order(entry: tuple[Event, Score, Urgency]) -> datetime:
 
 def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
              notifier: Notifier, settings: Settings, dry_run: bool) -> int:
-    to_send, reminders = digest.to_send, digest.reminders
-    below_floor = digest.below_floor
-    if not to_send and not reminders and not below_floor:
+    if digest.is_empty:
         print("\nRESULT")
         stage = funnel.first_zero()
         print("  No matching events to report.")
@@ -605,6 +609,46 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
             store.save()
         return 0
 
+    composed = _compose(digest, settings)
+    sent = notifier.send(composed.sections, composed.subject, composed.footer)
+    print("\nRESULT")
+    print(f"  {sent} events  |  {composed.tally}")
+    # Restated here because the header has scrolled far off screen by now, and
+    # "did that just email me?" is the one question the output must never leave
+    # ambiguous.
+    print("  NO EMAIL SENT (dry run)." if dry_run
+          else "  EMAIL SENT.")
+    if not dry_run:
+        # After the send, never before: every line here claims the reader has
+        # seen these, and notifier.send raises when SMTP refuses.
+        store.mark_cleared_floor(digest.cleared)
+        store.mark_alerted([e.event_uid for e, _, _ in digest.to_send],
+                           at=digest.now.isoformat())
+        # Marked separately and permanently: mark_alerted would leave these
+        # eligible again on the next hourly run, which is 72 reminders for one
+        # event over a 72h window.
+        store.mark_swept([e.event_uid for e, _, _ in digest.reminders])
+        store.save()
+    print(f"  ledger states: {store.counts_by_state()}")
+    return sent
+
+
+class _Composed(NamedTuple):
+    sections: list[Section]
+    subject: str
+    footer: str
+    # Console text, not mail: the RESULT line's per-section counts, printed
+    # after the number actually sent.
+    tally: str
+
+
+def _compose(digest: Digest, settings: Settings) -> _Composed:
+    """What one digest says, built without the store or the notifier."""
+    if digest.is_empty:
+        # The footer names the tier that scored the first event.
+        raise ValueError("_compose needs a digest holding at least one event")
+    to_send, reminders = digest.to_send, digest.reminders
+    below_floor = digest.below_floor
     # urgent and rest are new lists, so sorting them in place is local. The
     # rebind below is NOT cosmetic: `reminders` and `below_floor` are the very
     # objects held by the frozen Digest, and frozen only blocks rebinding the
@@ -653,30 +697,10 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
     method = (to_send or reminders or below_floor)[0][1].method
     footer = (f"Scored by the {method} tier. fit x access_value drives "
               "the ordering; cost is shown, not applied.")
-
-    sent = notifier.send(sections, subject, footer)
-    print("\nRESULT")
-    print(f"  {sent} events  |  P0 {len(urgent)}  other {len(rest)}"
-          + (f"  last call {len(reminders)}" if reminders else "")
-          + (f"  below floor {len(below_floor)}" if below_floor else ""))
-    # Restated here because the header has scrolled far off screen by now, and
-    # "did that just email me?" is the one question the output must never leave
-    # ambiguous.
-    print("  NO EMAIL SENT (dry run)." if dry_run
-          else "  EMAIL SENT.")
-    if not dry_run:
-        # After the send, never before: every line here claims the reader has
-        # seen these, and notifier.send raises when SMTP refuses.
-        store.mark_cleared_floor(digest.cleared)
-        store.mark_alerted([e.event_uid for e, _, _ in to_send],
-                           at=digest.now.isoformat())
-        # Marked separately and permanently: mark_alerted would leave these
-        # eligible again on the next hourly run, which is 72 reminders for one
-        # event over a 72h window.
-        store.mark_swept([e.event_uid for e, _, _ in reminders])
-        store.save()
-    print(f"  ledger states: {store.counts_by_state()}")
-    return sent
+    tally = (f"P0 {len(urgent)}  other {len(rest)}"
+             + (f"  last call {len(reminders)}" if reminders else "")
+             + (f"  below floor {len(below_floor)}" if below_floor else ""))
+    return _Composed(sections, subject, footer, tally)
 
 
 def _score_all(scorer: EventScorer, events: list[Event],

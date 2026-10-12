@@ -7,6 +7,9 @@
 # unset degrades scoring rather than disabling it.
 model: "gpt-5.6"
 reasoning_effort: "medium"
+# How many characters of an event's description a scorer is shown, and so how
+# much message body a mailbox item keeps for the keyword gate further down.
+max_description_chars: 4000
 # Tried in this order after the API, and the first one installed on this
 # machine scores the run. LLM_CLIS in .env reorders or narrows the list, and
 # path_env names a variable holding a full path for a CLI that is not on PATH.

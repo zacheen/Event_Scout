@@ -56,7 +56,7 @@ from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
                                 KeywordScorer, OpenAiScorer, ScoringPrompt)
 from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
                                  Digest, Funnel,
-                                 _at_capacity, _bound_reason, _collapse, _deliver,
+                                 _at_capacity, _bound_reason, _collapse, _compose,
                                  _START_GRACE, _stamp_naive, _start_order,
                                  _passes_gate, _same_event_key, render_funnel,
                                  run)
@@ -438,6 +438,14 @@ def offline() -> None:
                 refused = str(exc)
             check(f"a {key} no code accepts is refused at load, naming the key",
                   key in refused, refused or "it loaded")
+        _no_effort = re.sub(r"(?m)^reasoning_effort:.*\n", "", _raw_cfg)
+        path.write_text(_no_effort, encoding="utf-8")
+        from eventscout.config import Settings as _Settings
+        check("reasoning_effort defaults the same built by hand as loaded without the key",
+              _no_effort != _raw_cfg
+              and load_settings(path).reasoning_effort == _Settings().reasoning_effort,
+              f"loaded {load_settings(path).reasoning_effort!r}, "
+              f"built {_Settings().reasoning_effort!r}")
         path.write_text(_raw_cfg, encoding="utf-8")
         try:
             load_settings(path)
@@ -881,6 +889,47 @@ def offline() -> None:
     check("the count reports rows changed, not rows offered",
           changed != len(keep), f"{changed} of {len(keep)} offered")
 
+    section("store.upsert - a repeat sighting refreshes the listing, never the record")
+    with tempfile.TemporaryDirectory() as tmp_up:
+        db = SqliteEventStore(Path(tmp_up) / "up.db")
+        try:
+            uid = "jsonld:https://luma.com/up"
+            db.upsert(_event(event_uid=uid, url="https://luma.com/up", title="Old"))
+            db.set_state(uid, State.DISMISSED)
+            db.mark_alerted([uid], at="2026-09-01T00:00:00+00:00")
+            db.mark_cleared_floor([uid])
+            db.mark_swept([uid])
+            db._conn.execute("UPDATE events SET first_seen='2026-08-01T00:00:00+00:00' "
+                             "WHERE event_uid=?", (uid,))
+            _up_row = "SELECT * FROM events WHERE event_uid=?"
+            before = dict(db._conn.execute(_up_row, (uid,)).fetchone())
+            fresh = _event(event_uid=uid, url="https://luma.com/up", title="New",
+                           organizer="Org", start="2026-10-20T18:00:00-07:00",
+                           end="2026-10-20T20:00:00-07:00", location="San Jose, CA",
+                           attendance_mode=AttendanceMode.MIXED, description="Desc",
+                           rsvp_deadline="2026-10-19T18:00:00-07:00",
+                           published_at="2026-10-01T00:00:00+00:00", source="src")
+            db.upsert(fresh, Score(fit=7, access_value=6, cost=2, reason="why", method="m"),
+                      Urgency.P1, "career fair")
+            after = dict(db._conn.execute(_up_row, (uid,)).fetchone())
+        finally:
+            db.close()
+    # Every value distinct, so a value written into its neighbour's column shows.
+    _want = {"title": "New", "organizer": "Org", "start": fresh.start, "end_at": fresh.end,
+             "location": "San Jose, CA", "attendance_mode": str(AttendanceMode.MIXED),
+             "description": "Desc", "rsvp_deadline": fresh.rsvp_deadline,
+             "published_at": fresh.published_at, "source": "src", "source_kind": "jsonld",
+             "fit": 7, "access_value": 6, "cost": 2, "reason": "why", "score_method": "m",
+             "urgency": "P1", "keyword_hits": "career fair", "all_day": 0}
+    _wrong = {c: after[c] for c, v in _want.items() if after[c] != v}
+    check("every refreshed column holds its own value", not _wrong, f"wrong {_wrong}")
+    _kept = ("state", "first_seen", "alerted_at", "cleared_floor_at", "swept_at")
+    check("the record the second sighting must keep was all set before it",
+          all(before[c] for c in _kept), repr({c: before[c] for c in _kept}))
+    _moved = {c: (before[c], after[c]) for c in _kept if before[c] != after[c]}
+    check("state, first_seen and the sticky stamps survive a repeat sighting",
+          not _moved, f"moved {_moved}")
+
     section("pipeline - a full event is recorded but never mailed")
     # Capacity withholding end to end. The unit tests above cover _at_capacity, but the
     # wiring is what decides whether a full event reaches the digest, and it is
@@ -951,8 +1000,8 @@ def offline() -> None:
     check("a link only a configured hint accepts still gets its prose date",
           _hinted_made == ["2026-08-31T17:30:00-05:00"], str(_hinted_made))
 
-    section("pipeline - _deliver leaves the caller's lists alone")
-    # Guards _deliver's sorted()-not-.sort() choice (see its comment): sorting
+    section("pipeline - _compose leaves the caller's lists alone")
+    # Guards _compose's sorted()-not-.sort() choice (see its comment): sorting
     # reminders/below_floor in place would silently reorder the caller's lists.
     def _entry(uid, rank, start):
         return (_event(event_uid=f"jsonld:{uid}", url=f"https://luma.com/{uid}",
@@ -961,27 +1010,27 @@ def offline() -> None:
                 Score(fit=rank, access_value=1, cost=2, reason="r", method="Keyword"),
                 Urgency.P2)
 
-    with tempfile.TemporaryDirectory() as tmp_frozen:
-        db = SqliteEventStore(Path(tmp_frozen) / "frozen.db")
-        try:
-            # Both lists start in the order _deliver's sort would NOT produce.
-            reminders_in = [_entry("late", 1, "2026-09-30T18:00:00-07:00"),
-                            _entry("early", 1, "2026-09-21T18:00:00-07:00")]
-            below_in = [_entry("low", 1, _WHEN), _entry("high", 9, _WHEN)]
-            digest = Digest([], reminders_in, [], False, below_in,
-                            datetime(2026, 9, 1, tzinfo=timezone.utc))
-            with contextlib.redirect_stdout(io.StringIO()):
-                _deliver(digest, Funnel(), db, _Mailbox(), _offline, dry_run=True)
-            check("_deliver does not reorder the reminders it was handed",
-                  [e.url for e, _, _ in digest.reminders]
-                  == ["https://luma.com/late", "https://luma.com/early"],
-                  f"{[e.url for e, _, _ in digest.reminders]}")
-            check("nor the below-floor list",
-                  [e.url for e, _, _ in digest.below_floor]
-                  == ["https://luma.com/low", "https://luma.com/high"],
-                  f"{[e.url for e, _, _ in digest.below_floor]}")
-        finally:
-            db.close()
+    # Both lists start in the order _compose's sort would NOT produce.
+    reminders_in = [_entry("late", 1, "2026-09-30T18:00:00-07:00"),
+                    _entry("early", 1, "2026-09-21T18:00:00-07:00")]
+    below_in = [_entry("low", 1, _WHEN), _entry("high", 9, _WHEN)]
+    digest = Digest([], reminders_in, [], False, below_in,
+                    datetime(2026, 9, 1, tzinfo=timezone.utc))
+    _compose(digest, _offline)
+    _t1 = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    check("a digest holding only below-floor events is not empty, or a first "
+          "run's whole backlog would be reported as nothing to send",
+          not Digest([], [], [], False, below_in, _t1).is_empty)
+    check("while cleared alone is empty, since the seeding filter withheld those",
+          Digest([], [], ["jsonld:x"], False, [], _t1).is_empty)
+    check("_compose does not reorder the reminders it was handed",
+          [e.url for e, _, _ in digest.reminders]
+          == ["https://luma.com/late", "https://luma.com/early"],
+          f"{[e.url for e, _, _ in digest.reminders]}")
+    check("nor the below-floor list",
+          [e.url for e, _, _ in digest.below_floor]
+          == ["https://luma.com/low", "https://luma.com/high"],
+          f"{[e.url for e, _, _ in digest.below_floor]}")
 
     section("pipeline - the date window says which bound cut what")
     # Same two bounds as run()'s "Name the bound" comment; this proves the
@@ -1613,59 +1662,42 @@ def offline() -> None:
         finally:
             db.close()
 
-    section("pipeline._deliver - a heading names the cut it actually makes")
+    section("pipeline._compose - a heading names the cut it actually makes")
     # Measured on one run: the heading promised "within 72h" and was empty,
     # while 10 of the 11 events below it started inside 72 hours, the nearest
     # in 13. The split is Urgency.P0, which needs p0_min_rank as well as the
     # clock, so the heading was describing a partition it does not perform.
-    with tempfile.TemporaryDirectory() as tmp_head:
-        db = SqliteEventStore(Path(tmp_head) / "head.db")
-        box = _Sections()
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                _deliver(Digest([(_event(start=_WHEN),
-                                  Score(fit=5, access_value=5, cost=2),
-                                  Urgency.P2)], [], [], False, [],
-                                 datetime(2026, 9, 1, tzinfo=timezone.utc)),
-                         Funnel(), db, box, _offline, dry_run=True)
-            heads = [head for head, _ in box.sections]
-            check("a P1 or P2 event is not filed under a bare time heading",
-                  not any(h.startswith("CLOSING SOON") for h in heads),
-                  f"headings {heads}")
-            check("the sections say they are picks, not a clock",
-                  heads == ["TOP PICKS - closing within 72h", "OTHER PICKS",
-                            "LAST CALL - starts within 72h, sent once before, "
-                            "and this is the only reminder"],
-                  f"headings {heads}")
-        finally:
-            db.close()
+    heads = [head for head, _ in _compose(
+        Digest([(_event(start=_WHEN), Score(fit=5, access_value=5, cost=2), Urgency.P2)],
+               [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)),
+        _offline).sections]
+    check("a P1 or P2 event is not filed under a bare time heading",
+          not any(h.startswith("CLOSING SOON") for h in heads),
+          f"headings {heads}")
+    check("the sections say they are picks, not a clock",
+          heads == ["TOP PICKS - closing within 72h", "OTHER PICKS",
+                    "LAST CALL - starts within 72h, sent once before, "
+                    "and this is the only reminder"],
+          f"headings {heads}")
 
-    section("pipeline._deliver - TOP PICKS is ordered like OTHER PICKS")
+    section("pipeline._compose - TOP PICKS is ordered like OTHER PICKS")
     # A digest has printed TOP PICKS ranks as 48, 48, 42, 48, because only
     # OTHER PICKS was sorted while TOP PICKS kept fetch order.
-    with tempfile.TemporaryDirectory() as tmp_top:
-        db = SqliteEventStore(Path(tmp_top) / "top.db")
-        box = _Sections()
-        _late = "2026-09-24T09:00:00-07:00"
-        _soon = "2026-09-23T09:00:00-07:00"
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                _deliver(Digest([
-                    (_event(event_uid="x:a", url="https://luma.com/a", start=_soon),
-                     Score(fit=7, access_value=6, cost=2), Urgency.P0),
-                    (_event(event_uid="x:b", url="https://luma.com/b", start=_late),
-                     Score(fit=8, access_value=6, cost=2), Urgency.P0),
-                    (_event(event_uid="x:c", url="https://luma.com/c", start=_soon),
-                     Score(fit=8, access_value=6, cost=2), Urgency.P0)],
-                    [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)),
-                    Funnel(), db, box, _offline, dry_run=True)
-            urls = next(u for head, u in box.sections if head.startswith("TOP PICKS"))
-            check("_deliver orders TOP PICKS by rank, then by the clock",
-                  urls == ["https://luma.com/c", "https://luma.com/b",
-                           "https://luma.com/a"],
-                  f"order {urls}")
-        finally:
-            db.close()
+    _late = "2026-09-24T09:00:00-07:00"
+    _soon = "2026-09-23T09:00:00-07:00"
+    _top = _compose(Digest([
+        (_event(event_uid="x:a", url="https://luma.com/a", start=_soon),
+         Score(fit=7, access_value=6, cost=2), Urgency.P0),
+        (_event(event_uid="x:b", url="https://luma.com/b", start=_late),
+         Score(fit=8, access_value=6, cost=2), Urgency.P0),
+        (_event(event_uid="x:c", url="https://luma.com/c", start=_soon),
+         Score(fit=8, access_value=6, cost=2), Urgency.P0)],
+        [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)), _offline).sections
+    urls = next([e.url for e, _, _ in items] for head, items in _top
+                if head.startswith("TOP PICKS"))
+    check("_compose orders TOP PICKS by rank, then by the clock",
+          urls == ["https://luma.com/c", "https://luma.com/b", "https://luma.com/a"],
+          f"order {urls}")
 
     section("pipeline - the last-call sweep, once and only once")
     # See run()'s step-5 comment for why the sweep exists. Run 2 below fetches
@@ -1936,6 +1968,8 @@ def offline() -> None:
           f"--dryrun ended with {_refused(['--dryrun'])!r}")
     check("and --mark needs both its state and its url",
           _refused(["--mark", "saved"]) == 2)
+    check("a prefix is not read as the flag it starts, so --re cannot reset the ledger",
+          _refused(["--re"]) == 2, f"--re ended with {_refused(['--re'])!r}")
 
     # "You have not acted on it" vs state 'new' is EventStore.due_for_resweep's
     # third condition -- both the below-floor and the absorbed-alias paths to
@@ -2408,22 +2442,14 @@ def offline() -> None:
           sorted(_pair + [_undated], key=_start_order)[-1][0].start == "",
           "an undated event jumped the queue")
 
-    # Through _deliver, because the sort the reader actually sees is the one in
+    # Through _compose, because the sort the reader actually sees is the one in
     # there and a helper can be right while its call site still uses the string.
-    with tempfile.TemporaryDirectory() as tmp_sort:
-        db = SqliteEventStore(Path(tmp_sort) / "sort.db")
-        box = _Sections()
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                _deliver(Digest(list(_pair), [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)),
-                         Funnel(), db,
-                         box, _offline, dry_run=True)
-            urls = next(u for head, u in box.sections if head == "OTHER PICKS")
-            check("_deliver orders OTHER PICKS by the clock too",
-                  urls == ["https://luma.com/e", "https://luma.com/l"],
-                  f"order {urls}")
-        finally:
-            db.close()
+    urls = next([e.url for e, _, _ in items] for head, items in _compose(
+        Digest(list(_pair), [], [], False, [], datetime(2026, 9, 1, tzinfo=timezone.utc)),
+        _offline).sections if head == "OTHER PICKS")
+    check("_compose orders OTHER PICKS by the clock too",
+          urls == ["https://luma.com/e", "https://luma.com/l"],
+          f"order {urls}")
 
     section("notifier - an absolute time is converted, never sliced")
     # Same measurement as display_zone's docstring; the second
@@ -2591,6 +2617,8 @@ def offline() -> None:
                   mark("expired", url) == 2)
             check("a url the ledger never saw is reported, not silently accepted",
                   mark("saved", "https://luma.com/never") == 1)
+            check("a malformed url gets the usage line, not a traceback",
+                  mark("saved", "http://[bad") == 2)
             check("marking succeeds", mark("registered", url) == 0)
 
             db = SqliteEventStore(local_run.DB)
@@ -4169,6 +4197,25 @@ def offline() -> None:
           _extract(_geo_page).coordinates == (37.77, -122.42),
           repr(_extract(_geo_page).coordinates))
 
+    # An online event's own page, as a mailed link reaches it. Its
+    # VirtualLocation flattens to no location, so without the mode the geo
+    # filter has nothing to keep it by.
+    _online_page = ('<html><script type="application/ld+json">' + json.dumps({
+        "@type": "Event", "url": "https://luma.com/x", "name": "Real Name",
+        "startDate": "2026-09-20T18:00:00-07:00",
+        "eventAttendanceMode": "https://schema.org/OnlineEventAttendanceMode",
+        "location": {"@type": "VirtualLocation", "url": "https://zoom.us/j/1"}})
+        + "</script></html>")
+    _online = _extract(_online_page)
+    check("the event page's attendance mode is read, so an online event is kept",
+          _online.attendance_mode is AttendanceMode.ONLINE
+          and build_geo(load_channels()).keep(_online),
+          f"mode {_online.attendance_mode!r}, location {_online.location!r}")
+    _kept_mode = _extract(_ld("https://luma.com/x"), attendance_mode=AttendanceMode.ONLINE)
+    check("and a page stating no mode leaves the source's own mode alone",
+          _kept_mode.attendance_mode is AttendanceMode.ONLINE,
+          repr(_kept_mode.attendance_mode))
+
     typed = _extract(_ld("https://luma.com/x"))
     check("an exact startDate is read from the page, not guessed",
           typed.start == "2026-09-20T18:00:00-07:00", f"got {typed.start!r}")
@@ -4677,12 +4724,22 @@ def offline() -> None:
         b"2": (b"Subject: T\r\nDate: Mon, 8 Sep 2026 10:00:00 -0700\r\n"
                b"Content-Type: text/html; charset=unknown-8bit\r\n\r\n"
                b'<a href="https://luma.com/oddcharset">E</a>'),
+        # Raw bytes in the header make message.get return a Header object.
+        b"3": (b"Subject: T\r\nDate: Mon, 8 Sep 2026 10:00:00 -0700 \xe4\xb8\xad\r\n"
+               b'Content-Type: text/html\r\n\r\n<a href="https://luma.com/bytedate">E</a>'),
+        # A codec Python knows that raises UnicodeError rather than replacing.
+        b"4": (b"Subject: T\r\nDate: Mon, 8 Sep 2026 10:00:00 -0700\r\n"
+               b"Content-Type: text/html; charset=idna\r\n\r\n"
+               b'<a href="https://luma.com/idnacharset">\xe4\xb8\xad</a>'),
+        # Too many digits for a C long, so OverflowError rather than ValueError.
+        b"5": (b"Subject: T\r\nDate: Mon, 1 Jan 99999999999 10:00:00 +0000\r\n"
+               b'Content-Type: text/html\r\n\r\n<a href="https://luma.com/hugeyear">E</a>'),
     }
 
     class _OddImap(_FakeImap):
         def uid(self, cmd, *a):
             if cmd == "SEARCH":
-                return ("OK", [b"1 2"])
+                return ("OK", [b"1 2 3 4 5"])
             return ("OK", [(b"1 (BODY[] {0}", _ODD[a[0]])])
 
     try:
@@ -4694,6 +4751,13 @@ def offline() -> None:
           "baddate" in _odd and _odd["baddate"].published_at == "", repr(_odd))
     check("a message in a charset Python has no codec for keeps its links",
           "oddcharset" in _odd, repr(_odd))
+    check("a Date carrying raw bytes is still read as the message date",
+          "bytedate" in _odd and _odd["bytedate"].published_at.startswith("2026-09-08"),
+          repr(_odd.get("bytedate", _odd)))
+    check("and a codec that refuses errors='replace' does not escape fetch()",
+          "idnacharset" in _odd, repr(_odd))
+    check("nor does a Date whose year overflows, which is read as undated",
+          "hugeyear" in _odd and _odd["hugeyear"].published_at == "", repr(_odd))
 
     # The default connection is the one place left that needs the real class
     # replaced, since what it passes to that class is what is under test.

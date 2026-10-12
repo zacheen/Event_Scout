@@ -13,9 +13,9 @@ from __future__ import annotations
 from typing import ClassVar
 
 from ..http import HttpClient
-from ..models import AttendanceMode, Event, iso_or_empty
+from ..models import Event, iso_or_empty
 from ..urls import canon_url
-from ._jsonld import event_nodes, flatten_text, place_coordinates
+from ._jsonld import attendance_mode, event_nodes, flatten_text, place_coordinates
 
 
 
@@ -62,26 +62,10 @@ class JsonLdSource:
             organizer=flatten_text(node.get("organizer")),
             location=flatten_text(node.get("location")),
             coordinates=place_coordinates(node.get("location")),
-            attendance_mode=self._attendance_mode(str(node.get("eventAttendanceMode") or "")),
+            attendance_mode=attendance_mode(node.get("eventAttendanceMode")),
             description=str(node.get("description") or "").strip(),
             # None of the four verified sites emit schema.org's datePublished
             # (see Event.published_at for the consequence of leaving it empty).
             published_at="",
         )
-
-    @staticmethod
-    def _attendance_mode(raw: str) -> AttendanceMode:
-        """Map a schema.org eventAttendanceMode URI onto the shared enum.
-
-        Kept out of AttendanceMode per its no-normalisation rule; matching the
-        URI tail is safe here since it's a controlled vocabulary, not free text.
-        """
-        tail = (raw or "").rsplit("/", 1)[-1].lower()
-        if tail.startswith("online"):
-            return AttendanceMode.ONLINE
-        if tail.startswith("mixed"):
-            return AttendanceMode.MIXED
-        if tail.startswith("offline"):
-            return AttendanceMode.OFFLINE
-        return AttendanceMode.UNKNOWN
 
