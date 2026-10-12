@@ -104,12 +104,17 @@ class JsonInvoker(Protocol):
 
 
 class EventScorer(Protocol):
-    # CliScorer and CachingScorer meet this with an instance property, since
-    # their label depends on which CLI or which wrapped tier they hold. Kept a
-    # ClassVar annotation because check.py's _conformance sees annotations and
-    # methods but not properties, so declaring a property here would stop it
-    # noticing an implementation with no label at all.
-    method_label: ClassVar[str]
+    @property
+    def method_label(self) -> str:
+        """The tier as the digest footer and the ledger name it.
+
+        A read-only property rather than a ClassVar, because CliScorer's and
+        CachingScorer's labels depend on which CLI or which wrapped tier the
+        instance holds. A plain class attribute, as KeywordScorer has, still
+        satisfies it.
+        """
+        ...
+
     # Whether wrapping this scorer in a cache pays for itself. False for a
     # cheap deterministic tier; see KeywordScorer.cacheable for why.
     cacheable: ClassVar[bool]

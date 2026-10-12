@@ -33,6 +33,7 @@ import tempfile
 import threading
 import time
 import traceback
+import typing
 
 import yaml
 from dataclasses import replace
@@ -123,18 +124,16 @@ def _conformance(proto, impl) -> tuple[list[str], list[str]]:
     __init__, so hasattr on the class is False even though every source is
     correct. Checking the class alone reported all three sources as broken.
 
-    Two more blind spots this closes: a bare class-level annotation such as
-    `cacheable: ClassVar[bool]` never appears in dir(proto), because Python
-    records an unassigned annotation only in __annotations__, so a scorer that
-    forgot `cacheable` would otherwise pass; and hasattr alone cannot see a
-    changed parameter list, which is exactly how UrgencyEngine.classify
-    drifted, with the Protocol declaring two parameters while every caller and
-    the only implementation passed three.
+    The members come from _members, so a bare annotation such as
+    `cacheable: ClassVar[bool]` and a property such as EventScorer.method_label
+    are checked like methods. hasattr alone cannot see a changed parameter
+    list, which is exactly how UrgencyEngine.classify drifted, with the
+    Protocol declaring two parameters while every caller and the only
+    implementation passed three, so methods are also compared by signature.
     """
-    methods = [n for n in dir(proto)
-               if not n.startswith("_") and callable(getattr(proto, n, None))]
-    data = [n for n in getattr(proto, "__annotations__", {}) if not n.startswith("_")]
-    missing = [n for n in methods + data if not hasattr(impl, n)]
+    members = sorted(_members(proto))
+    methods = [n for n in members if callable(getattr(proto, n, None))]
+    missing = [n for n in members if not hasattr(impl, n)]
     drifted = []
     for name in methods:
         if not hasattr(impl, name):
@@ -178,15 +177,14 @@ def _config_keys_read(path: Path) -> set[str]:
 
 
 def _members(proto) -> set[str]:
-    """Public members of a Protocol, methods AND bare annotations.
+    """Public members of a Protocol, the one list every check here reads.
 
-    dir() alone misses an annotation-only member such as `cacheable:
-    ClassVar[bool]`, which is why _conformance unions __annotations__ too. Kept
-    as one helper because computing the two sets differently is how a member
-    silently stops being checked.
+    typing.get_protocol_members covers methods, properties and bare
+    annotations, inherited ones included. Gathering them by hand took one scan
+    per kind, so a kind with no scan of its own went unchecked, and it left
+    BoundedSource without the `name` and `kind` it inherits from EventSource.
     """
-    return ({n for n in dir(proto) if not n.startswith("_")}
-            | set(getattr(proto, "__annotations__", {})))
+    return {n for n in typing.get_protocol_members(proto) if not n.startswith("_")}
 
 
 def _attrs_used(path: Path, var: str) -> set[str]:
