@@ -6,7 +6,7 @@ Run the Event Scout local run once in D:\dont_move\git_save\Event_Scout, which r
 
 ## Rule sources
 
-1. The repo's CLAUDE.md describes running and testing Event Scout by hand. Run none of the commands it names, such as `check.py` or a bare `local_run.py`, because the closed list below is the only set allowed, and `scheduled_check.py run` already applies the flags CLAUDE.md asks for and sends the output to a fixed file. An `HTTP Error 429` from the Luma sources is rate limiting, not a regression.
+1. The repo's CLAUDE.md describes running and testing Event Scout by hand. Run none of the commands it names, such as `check.py` or a bare `local_run.py`, because the closed list below is the only set allowed, and `scheduled_check.py run` already applies the flags a scheduled run needs and sends the output to a fixed file. An `HTTP Error 429` from the Luma sources is rate limiting, not a regression.
 2. Before running, read Pending_fix.md and Known_concern.md at the repo root in full. Both are registers of known defects, kept to suppress repeat reports. Never report anything already registered unless its measured facts changed (fixed, worse, or failing a different way), and in that case name the entry number and what changed.
 
 ## Allowed commands (closed list)
@@ -19,13 +19,13 @@ Only the three commands below may run during a scheduled run. Commands 1 and 2 m
 
 ## Running
 
-- Run command 1 with the Bash tool and `run_in_background` set to true. It takes about 11 minutes, which is longer than the Bash tool's 10-minute foreground limit. Do not poll or sleep while it runs, since any command off the closed list stops at a permission prompt. Wait for the completion notification, then read the output file it names with the Read tool. In order, the command records the start time in UTC, prints the ledger snapshot before the run, runs `local_run.py --show-digest` (which really sends mail), prints the snapshot after the run and the differences, lists the rows this run wrote to `alerted_at` and `swept_at`, and prints how many `cleared_floor_at` values it wrote.
+- Run command 1 with the Bash tool and `run_in_background` set to true. It takes about 11 minutes, which is longer than the Bash tool's 10-minute foreground limit. Do not poll or sleep while it runs, since any command off the closed list stops at a permission prompt. Wait for the completion notification, then read the output file it names with the Read tool. In order, the command records the start time in UTC, prints the ledger snapshot before the run, runs `local_run.py --email --no-html --show-digest` (which really sends mail and opens no results page), prints the snapshot after the run and the differences, lists the rows this run wrote to `alerted_at` and `swept_at`, and prints how many `cleared_floor_at` values it wrote.
 - The full output of `local_run.py` is in `D:\dont_move\git_save\Event_Scout\.private\scheduled_run.log`. Read all of it with the Read tool, not just the end.
 - Command 2 is read-only and prints only the current ledger counts and config thresholds. Use it only when you need to look again.
 
 ## What to check
 
-- Whether command 1 prints `local_run.py --show-digest exit code: 0`, and whether the log contains `EMAIL SENT`.
+- Whether command 1 prints `local_run.py --email --no-html --show-digest exit code: 0`, and whether the log contains a line reading exactly `EMAIL SENT.`. A `DRY RUN` banner at the top of the log means the mail credentials were missing, so nothing was mailed or recorded, which is a problem.
 - The FETCH table near the top of the log, which has one line per source. Read every line rather than trusting the exit code, because the exit code stays 0 when at least one source succeeds (Known_concern.md #6).
   - A line carrying `ERROR` means that source failed and the run went on without it. It is a problem.
   - A line ending in `<-- returned nothing` means a source that did not fail found no events, which is also what a source whose page format changed looks like. It is a problem too.

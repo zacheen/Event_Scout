@@ -6,14 +6,17 @@ is each item in.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from .models import (AttendanceMode, Event, Score, State, Urgency,
-                     iso_or_empty)
+                     iso_or_empty, parse_iso)
 from .urls import canon_url
 
 # Columns export_jsonl holds back. Removing them does NOT make the mirror
@@ -166,6 +169,116 @@ _STICKY_MERGE = ("ON CONFLICT(event_uid) DO UPDATE SET "
                               _merge_timestamp("alerted_at", "MAX"))))
 
 
+def _listings_of(conn: sqlite3.Connection, url: str) -> list[sqlite3.Row]:
+    """(event_uid, title) of every row stored under this canonical URL.
+
+    Two passes, because canon_url has gained rules (recipient params, a
+    lowercase fix) since the oldest rows were written, so a row can be stored
+    under a spelling the caller's clean URL no longer matches. The indexed
+    lookup handles every row written since, and the scan runs ONLY when that
+    finds nothing. A full normalising migration is not done instead because
+    event_uid embeds the URL and score_cache keys on event_uid, so rewriting
+    one column would have to cascade through the primary key.
+    """
+    wanted = canon_url(url)
+    rows = conn.execute(
+        "SELECT event_uid, title FROM events WHERE canonical_url=?",
+        (wanted,)).fetchall()
+    if not rows:
+        rows = [row for row in conn.execute(
+            "SELECT event_uid, title, canonical_url FROM events")
+            if canon_url(row["canonical_url"]) == wanted]
+    return rows
+
+
+class MailedListing(NamedTuple):
+    """One ledger row as the results page needs it."""
+    event: Event
+    # None for a row the run stored without a score.
+    score: Score | None
+    urgency: Urgency | None
+    state: State
+    # The later of alerted_at and swept_at, so a last call files the event
+    # under the day it was reminded rather than the day it was first mailed.
+    mailed_at: datetime
+
+
+class ReaderLedger:
+    """The results page's access to an existing ledger, one connection per call.
+
+    A connection is never held between calls. The run commits its sticky
+    columns right after the send, and a reader holding the file at that moment
+    makes the commit wait out its timeout and raise, after which the next run
+    mails the same digest again.
+    """
+
+    def __init__(self, path: str | Path, timeout: float = 2.0):
+        self._path = Path(path)
+        self._timeout = timeout
+
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # mode=rw so a missing ledger raises instead of being created empty,
+        # which the page would show as nothing ever mailed.
+        conn = sqlite3.connect(f"{self._path.resolve().as_uri()}?mode=rw",
+                               uri=True, timeout=self._timeout)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    def page_rows(self, since: datetime) -> list[MailedListing]:
+        """Every row alerted or swept at or after `since`, in any state, and
+        every saved row ever delivered, since a saved event stays pinned until
+        it is unmarked."""
+        stamp = since.astimezone(timezone.utc).isoformat(timespec="seconds")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE datetime(alerted_at) >= datetime(?) "
+                "OR datetime(swept_at) >= datetime(?) "
+                "OR (state = 'saved' AND (alerted_at != '' OR swept_at != ''))",
+                (stamp, stamp)).fetchall()
+        listings = []
+        for row in rows:
+            stamps = [s for s in (parse_iso(row["alerted_at"] or ""),
+                                  parse_iso(row["swept_at"] or "")) if s]
+            score = None if row["fit"] is None else Score(
+                fit=row["fit"], access_value=row["access_value"], cost=row["cost"],
+                reason=row["reason"] or "", method=row["score_method"] or "")
+            listings.append(MailedListing(
+                event=_row_to_event(row), score=score,
+                urgency=Urgency(row["urgency"]) if row["urgency"] else None,
+                state=State(row["state"]), mailed_at=max(stamps)))
+        return listings
+
+    def mark(self, url: str, state: State) -> int:
+        """mark_by_url for the page. Returns how many listings matched."""
+        if not state.choosable:
+            raise ValueError(f"{state.value} is not a state the reader can choose")
+        with self._connect() as conn:
+            rows = _listings_of(conn, url)
+            conn.executemany("UPDATE events SET state=? WHERE event_uid=?",
+                             [(str(state), r["event_uid"]) for r in rows])
+        return len(rows)
+
+    def unmark(self, url: str) -> int:
+        """Undo a reader's mark, back to the seen that mark_alerted leaves.
+
+        Only reader-chosen states move, so an event that expired or sold out
+        since keeps that.
+        """
+        chosen = [str(s) for s in State if s.choosable]
+        with self._connect() as conn:
+            uids = [r["event_uid"] for r in _listings_of(conn, url)]
+            cursor = conn.executemany(
+                f"UPDATE events SET state=? WHERE event_uid=? "
+                f"AND state IN ({', '.join('?' * len(chosen))})",
+                [(str(State.SEEN), uid, *chosen) for uid in uids])
+        return cursor.rowcount
+
+
 class SqliteEventStore:
     def __init__(self, path: str | Path):
         self._path = Path(path)
@@ -308,22 +421,7 @@ class SqliteEventStore:
         that used native ids instead (see Event.event_uid) would break it.
         """
         with self._lock:
-            # Two passes, because canon_url has gained rules (recipient params,
-            # a lowercase fix) since the oldest rows were written, so a row can
-            # be stored under a spelling the caller's clean URL no longer
-            # matches. The indexed lookup handles every row written since, and
-            # the scan runs ONLY when that finds nothing. A full normalising
-            # migration is not done instead because event_uid embeds the URL
-            # and score_cache keys on event_uid, so rewriting one column would
-            # have to cascade through the primary key.
-            wanted = canon_url(url)
-            rows = self._conn.execute(
-                "SELECT event_uid, title FROM events WHERE canonical_url=?",
-                (wanted,)).fetchall()
-            if not rows:
-                rows = [row for row in self._conn.execute(
-                    "SELECT event_uid, title, canonical_url FROM events")
-                    if canon_url(row["canonical_url"]) == wanted]
+            rows = _listings_of(self._conn, url)
             self._conn.executemany(
                 "UPDATE events SET state=? WHERE event_uid=?",
                 [(str(state), r["event_uid"]) for r in rows])

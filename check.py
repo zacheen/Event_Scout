@@ -28,6 +28,7 @@ import inspect
 import logging
 import io
 import re
+import socket
 import sqlite3
 import subprocess
 import json
@@ -51,8 +52,8 @@ from eventscout.config import (_parse_labels, build_geo, build_runtime, build_so
 from eventscout.geo import GeoFilter, _miles
 from eventscout.http import (HostRateLimiter, HttpClient, StubHttpClient,
                              UrllibHttpClient, _decode_body)
-from eventscout.notifier import (ConsoleNotifier, EmailNotifier, _lead_time,
-                                 build_ics, format_digest)
+from eventscout.notifier import (ConsoleNotifier, EmailNotifier, PageOnlyNotifier,
+                                 _lead_time, build_ics, format_digest)
 from eventscout import notifier as notifier_module, pipeline, protocols
 from eventscout.scoring import (CachingScorer, CliScorer, DeadlineUrgency,
                                 _parse_score,
@@ -63,7 +64,7 @@ from eventscout.pipeline import (AllScoringFailedError, AllSourcesFailedError,
                                  _START_GRACE, _stamp_naive, _start_order,
                                  _passes_gate, _same_event_key, render_funnel,
                                  run)
-from eventscout.store import SqliteEventStore
+from eventscout.store import MailedListing, ReaderLedger, SqliteEventStore
 from eventscout.models import (AttendanceMode, Coverage, Event, Score, State,
                                Urgency, coordinates_or_none,
                                display_zone, is_date_only, iso_or_empty,
@@ -297,6 +298,12 @@ def offline() -> None:
          "PageFactExtractor"),
         (protocols.JsonInvoker, CliScorer(["x"], _prompt, name="x"), "CliScorer as JsonInvoker"),
         (protocols.JsonInvoker, OpenAiScorer("k", "m", _prompt), "OpenAiScorer as JsonInvoker"),
+        (protocols.Notifier, EmailNotifier("u", "p", "t", "America/Los_Angeles",
+                                           long_running_days=30), "EmailNotifier"),
+        (protocols.Notifier, ConsoleNotifier("America/Los_Angeles", long_running_days=30),
+         "ConsoleNotifier"),
+        (protocols.Notifier, PageOnlyNotifier("America/Los_Angeles", long_running_days=30),
+         "PageOnlyNotifier"),
         (protocols.EventFilter, GeoFilter, "GeoFilter"),
         (protocols.UrgencyEngine, DeadlineUrgency, "DeadlineUrgency"),
     ]
@@ -574,6 +581,8 @@ def offline() -> None:
             return [_listing(self.kind, self._url)]
 
     class _Mailbox:
+        outcome = "Digest captured by test notifier."
+
         def __init__(self):
             self.mailed = []
 
@@ -803,6 +812,8 @@ def offline() -> None:
 
     class _Sections:
         """Keeps the section HEADINGS, which _Mailbox discards."""
+
+        outcome = "Digest captured by test notifier."
 
         def __init__(self):
             self.sections = []
@@ -2040,6 +2051,8 @@ def offline() -> None:
     # "Computed after the loop" comment for why writing it early would turn a
     # refused SMTP call into permanent silence).
     class _Refused:
+        outcome = "Digest captured by test notifier."
+
         def send(self, sections, subject, footer=""):
             raise RuntimeError("SMTP said no")
 
@@ -2622,6 +2635,313 @@ def offline() -> None:
         finally:
             db.close()
             local_run.DB = real_db
+
+    section("local_run delivery - a run by hand opens the page and mails nothing")
+    check("with no flags a run delivers to the page, never by mail",
+          local_run._delivery(False, local_run._parse([]).email,
+                              local_run._parse([]).html, True) == "page")
+    _sched = local_run._parse(["--email", "--no-html"])
+    check("the scheduled run's flags mail and open no page",
+          local_run._delivery(False, _sched.email, _sched.html, True) == "email"
+          and not _sched.html)
+    check("missing credentials drop the email, not the page",
+          local_run._delivery(False, True, True, False) == "page")
+    check("no email and no page deliver nowhere, so the run records nothing",
+          local_run._delivery(False, False, False, True) == "dry")
+    check("--dry-run wins over every channel",
+          local_run._delivery(True, True, True, True) == "dry")
+
+    with tempfile.TemporaryDirectory() as tmp_page:
+        db = SqliteEventStore(Path(tmp_page) / "p.db")
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                run([_OneListing("jsonld", "https://luma.com/pageonly")], db,
+                    build_geo(load_channels()),
+                    replace(_offline, first_run_mode="report_everything"),
+                    PageOnlyNotifier("America/Los_Angeles", long_running_days=30),
+                    dry_run=False, now=_NOW)
+            alerted = db._conn.execute(
+                "SELECT alerted_at FROM events WHERE canonical_url=?",
+                ("https://luma.com/pageonly",)).fetchone()
+            check("a page-only run records its events as told, or the page "
+                  "would list nothing", bool(alerted and alerted[0]),
+                  f"alerted_at {alerted}")
+            check("and its RESULT block does not claim an email went out",
+                  not re.search(r"^\s*EMAIL SENT\.$", out.getvalue(), re.M)
+                  and PageOnlyNotifier.outcome in out.getvalue(),
+                  out.getvalue()[-400:])
+        finally:
+            db.close()
+
+    section("results_page - the ledger is the only store behind the page")
+    import results_page
+
+    _PNOW = datetime(2026, 10, 27, 18, 0, tzinfo=timezone.utc)  # 11:00 Pacific
+    _LA = display_zone("America/Los_Angeles")
+
+    with tempfile.TemporaryDirectory() as tmp_rl:
+        path = Path(tmp_rl) / "r.db"
+        db = SqliteEventStore(path)
+        try:
+            for kind in ("jsonld", "newsletter"):
+                db.upsert(_event(event_uid=f"{kind}:https://luma.com/a",
+                                 url="https://luma.com/a", source_kind=kind,
+                                 start="2026-10-30T18:00:00-07:00"),
+                          Score(fit=3, access_value=4, cost=2, reason="r", method="kw"),
+                          Urgency.P1)
+            db.upsert(_event(event_uid="jsonld:https://luma.com/old", url="https://luma.com/old"))
+            db.upsert(_event(event_uid="jsonld:https://luma.com/never",
+                             url="https://luma.com/never"))
+            db.upsert(_event(event_uid="jsonld:https://luma.com/swept",
+                             url="https://luma.com/swept"))
+            db.upsert(_event(event_uid="jsonld:https://luma.com/gone",
+                             url="https://luma.com/gone"))
+            db.mark_alerted(["jsonld:https://luma.com/a", "newsletter:https://luma.com/a"],
+                            at="2026-10-26T18:00:00+00:00")
+            db.mark_alerted(["jsonld:https://luma.com/old"], at="2026-10-19T18:00:00+00:00")
+            db.mark_alerted(["jsonld:https://luma.com/swept", "jsonld:https://luma.com/gone"],
+                            at="2026-10-15T18:00:00+00:00")
+            db._conn.execute("UPDATE events SET swept_at='2026-10-27T06:00:00+00:00' "
+                             "WHERE canonical_url='https://luma.com/swept'")
+            db._conn.execute("UPDATE events SET state='expired' "
+                             "WHERE canonical_url='https://luma.com/gone'")
+            for name in ("kept", "never-sent"):
+                db.upsert(_event(event_uid=f"jsonld:https://luma.com/{name}",
+                                 url=f"https://luma.com/{name}"))
+                db.set_state(f"jsonld:https://luma.com/{name}", State.SAVED)
+            db.mark_alerted(["jsonld:https://luma.com/kept"], at="2026-10-01T18:00:00+00:00")
+            db.save()
+        finally:
+            db.close()
+
+        ledger = ReaderLedger(path)
+        got = {l.event.url: l for l in ledger.page_rows(_PNOW - timedelta(days=6))}
+        check("page_rows returns the rows delivered inside the window, and saved "
+              "ones delivered at any time, and no others",
+              set(got) == {"https://luma.com/a", "https://luma.com/swept",
+                           "https://luma.com/kept"},
+              f"got {sorted(got)}")
+        check("a last call files the event under the day it was reminded",
+              "https://luma.com/swept" in got and got["https://luma.com/swept"].mailed_at
+              == datetime(2026, 10, 27, 6, 0, tzinfo=timezone.utc),
+              f"mailed_at {got.get('https://luma.com/swept')}")
+        check("the stored score and urgency come back with the row",
+              "https://luma.com/a" in got and got["https://luma.com/a"].score.fit == 3
+              and got["https://luma.com/a"].urgency == Urgency.P1)
+
+        check("a mark reaches every listing of the event",
+              results_page.decide(ledger, "https://luma.com/a", "registered") == 2)
+        with contextlib.closing(sqlite3.connect(path)) as raw:
+            states = {r[0] for r in raw.execute(
+                "SELECT state FROM events WHERE canonical_url='https://luma.com/a'")}
+        check("and is committed, so the run's own connection reads it",
+              states == {"registered"}, f"states {states}")
+        check("undo returns it to seen",
+              results_page.decide(ledger, "https://luma.com/a", "") == 2
+              and {l.state for l in ledger.page_rows(_PNOW - timedelta(days=6))
+                   if l.event.url == "https://luma.com/a"} == {State.SEEN})
+        check("undo leaves an event that expired meanwhile as expired",
+              ledger.unmark("https://luma.com/gone") == 0)
+        try:
+            ledger.mark("https://luma.com/a", State.EXPIRED)
+            refused = False
+        except ValueError:
+            refused = True
+        check("the page cannot set a state only time or the listing causes", refused)
+
+        missing = Path(tmp_rl) / "missing.db"
+        try:
+            ReaderLedger(missing).page_rows(_PNOW)
+            raised = False
+        except sqlite3.Error:
+            raised = True
+        check("a missing ledger raises instead of being created empty",
+              raised and not missing.exists())
+
+        # The server end to end on a spare port, so the Host and Content-Type
+        # guards are exercised the way a browser reaches them.
+        server = results_page.ResultsServer(("127.0.0.1", 0), ledger,
+                                            results_page._Clients(), _LA,
+                                            timedelta(days=30))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        import http.client
+
+        def state_of_a():
+            return {l.state for l in ledger.page_rows(_PNOW - timedelta(days=6))
+                    if l.event.url == "https://luma.com/a"}
+
+        def ask(method, path_, body=None, host=f"127.0.0.1:{server.server_address[1]}",
+                kind="application/json"):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1],
+                                              timeout=10)
+            try:
+                conn.putrequest(method, path_, skip_host=True)
+                conn.putheader("Host", host)
+                data = json.dumps(body).encode() if body is not None else b""
+                if body is not None:
+                    conn.putheader("Content-Type", kind)
+                conn.putheader("Content-Length", str(len(data)))
+                conn.endheaders(data)
+                return conn.getresponse().status
+            finally:
+                conn.close()
+
+        try:
+            check("the page serves its events", ask("GET", "/api/events?cid=x") == 200)
+            check("a request under a foreign Host is refused",
+                  ask("GET", "/api/events", host=f"evil.test:{server.server_address[1]}") == 403)
+            check("a mark posted under a foreign Host is refused and changes nothing",
+                  ask("POST", "/api/decide", {"url": "https://luma.com/a",
+                                              "state": "dismissed"},
+                      host=f"evil.test:{server.server_address[1]}") == 403
+                  and state_of_a() == {State.SEEN}, f"states {state_of_a()}")
+            check("a mark posted as text/plain is refused, since only JSON forces "
+                  "a preflight",
+                  ask("POST", "/api/decide", {"url": "https://luma.com/a",
+                                              "state": "dismissed"},
+                      kind="text/plain") == 415
+                  and state_of_a() == {State.SEEN}, f"states {state_of_a()}")
+            check("a mark posted as JSON is saved",
+                  ask("POST", "/api/decide", {"url": "https://luma.com/a",
+                                              "state": "dismissed"}) == 200)
+            check("a mark for an event the ledger never held is a conflict",
+                  ask("POST", "/api/decide", {"url": "https://luma.com/nope",
+                                              "state": "saved"}) == 409)
+            check("an unknown decision is refused",
+                  ask("POST", "/api/decide", {"url": "https://luma.com/a",
+                                              "state": "expired"}) == 400)
+            check("a running results page is recognised on its port, so a second "
+                  "launch reopens it",
+                  results_page.listener("127.0.0.1", server.server_address[1]) == "ours")
+            try:
+                results_page.ResultsServer(("127.0.0.1", server.server_address[1]),
+                                           ledger, results_page._Clients(), _LA,
+                                           timedelta(days=30)).server_close()
+                second_bound = True
+            except OSError:
+                second_bound = False
+            check("a second page cannot bind the port the first one holds",
+                  not second_bound)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        class _Stranger(results_page.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"<title>something else</title>")
+
+            def log_message(self, format, *args):
+                pass
+
+        stranger = results_page.ThreadingHTTPServer(("127.0.0.1", 0), _Stranger)
+        threading.Thread(target=stranger.serve_forever, daemon=True).start()
+        try:
+            check("another server on the port is told apart from the page",
+                  results_page.listener("127.0.0.1", stranger.server_address[1]) == "other")
+        finally:
+            stranger.shutdown()
+            stranger.server_close()
+        with socket.socket() as _probe:
+            _probe.bind(("127.0.0.1", 0))
+            _free = _probe.getsockname()[1]
+        check("a free port reads as free",
+              results_page.listener("127.0.0.1", _free) == "")
+
+    def _ml(url, mailed, state=State.SEEN, **kw):
+        return MailedListing(event=_event(event_uid=f"jsonld:{url}", url=url, **kw),
+                             score=None, urgency=None, state=state,
+                             mailed_at=datetime.fromisoformat(mailed))
+
+    _view = results_page.build_view([
+        # 05:00 UTC is still the previous evening in Pacific.
+        _ml("https://x/late-night", "2026-10-27T05:00:00+00:00",
+            start="2026-11-02T18:00:00-08:00"),
+        _ml("https://x/today-b", "2026-10-27T16:00:00+00:00",
+            start="2026-11-05T18:00:00-08:00"),
+        _ml("https://x/today-a", "2026-10-27T16:00:00+00:00",
+            start="2026-11-01T18:00:00-07:00"),
+        _ml("https://x/undated", "2026-10-27T16:00:00+00:00"),
+        _ml("https://x/four-days", "2026-10-23T18:00:00+00:00",
+            start="2026-11-03T18:00:00-08:00"),
+        _ml("https://x/five-days", "2026-10-22T18:00:00+00:00",
+            start="2026-11-03T18:00:00-08:00"),
+        _ml("https://x/over", "2026-10-26T18:00:00+00:00",
+            start="2026-10-27T08:00:00-07:00"),
+        _ml("https://x/all-day", "2026-10-26T18:00:00+00:00",
+            start="2026-10-27T00:00:00-07:00", all_day=True),
+        # Delivery order differs from start order either way round, so a sort
+        # by delivery cannot pass for a sort by start.
+        _ml("https://x/saved-later", "2026-10-26T18:00:00+00:00", State.SAVED,
+            start="2026-11-09T18:00:00-08:00"),
+        _ml("https://x/saved-sooner", "2026-10-25T18:00:00+00:00", State.SAVED,
+            start="2026-10-29T18:00:00-07:00"),
+        _ml("https://x/saved-over", "2026-10-25T18:00:00+00:00", State.SAVED,
+            start="2026-10-26T18:00:00-07:00"),
+        _ml("https://x/saved-long-ago", "2026-10-10T18:00:00+00:00", State.SAVED,
+            start="2026-11-20T18:00:00-08:00"),
+        _ml("https://x/registered", "2026-10-26T18:00:00+00:00", State.REGISTERED,
+            start="2026-10-26T18:00:00-07:00"),
+        _ml("https://x/dismissed", "2026-10-27T17:00:00+00:00", State.DISMISSED),
+        _ml("https://x/expired", "2026-10-27T17:00:00+00:00", State.EXPIRED),
+    ], _PNOW, _LA, long_running=timedelta(days=30))
+    _days = {d["date"]: [e["url"] for e in d["events"]] for d in _view["days"]}
+    check("days are grouped by the Pacific day they were delivered, newest first",
+          [d["date"] for d in _view["days"]] == ["2026-10-27", "2026-10-26", "2026-10-23"],
+          f"days {list(_days)}")
+    check("an evening delivery lands on its Pacific day, not the UTC one",
+          "https://x/late-night" in _days.get("2026-10-26", []), f"days {_days}")
+    check("inside a day events run soonest first, undated last",
+          _days.get("2026-10-27") == ["https://x/today-a", "https://x/today-b",
+                                      "https://x/undated"], f"days {_days}")
+    check("a delivery four days back is shown and five days back is not",
+          "https://x/four-days" in _days.get("2026-10-23", [])
+          and all("https://x/five-days" not in v for v in _days.values()),
+          f"days {_days}")
+    check("a finished todo is left out",
+          all("https://x/over" not in v for v in _days.values()), f"days {_days}")
+    check("an all-day event with no end stays for its whole day",
+          "https://x/all-day" in _days.get("2026-10-26", []), f"days {_days}")
+    check("saved events run soonest first, a finished one is left out and one "
+          "delivered long ago stays pinned",
+          [e["url"] for e in _view["saved"]] == ["https://x/saved-sooner",
+                                                 "https://x/saved-later",
+                                                 "https://x/saved-long-ago"],
+          f"saved {[e['url'] for e in _view['saved']]}")
+    check("handled holds registered and dismissed, newest first, finished or not",
+          [e["url"] for e in _view["handled"]] == ["https://x/dismissed",
+                                                   "https://x/registered"],
+          f"handled {[e['url'] for e in _view['handled']]}")
+    _dup = results_page.build_view([
+        _ml("https://x/dup", "2026-10-25T18:00:00+00:00", start="2026-11-03T18:00:00-08:00"),
+        _ml("https://x/dup", "2026-10-27T16:00:00+00:00", start="2026-11-03T18:00:00-08:00"),
+    ], _PNOW, _LA, long_running=timedelta(days=30))
+    check("listings sharing a URL show once, under the latest delivery",
+          [(d["date"], len(d["events"])) for d in _dup["days"]] == [("2026-10-27", 1)],
+          f"days {_dup['days']}")
+
+    _t0 = 1000.0
+    check("before any page connects, only the startup grace ends the server",
+          results_page.exit_reason(_t0 + 10, _t0, {}, False) == ""
+          and results_page.exit_reason(_t0 + results_page.STARTUP_GRACE + 1, _t0, {},
+                                       False) != "")
+    check("an open page keeps it alive and its silence ends it",
+          results_page.exit_reason(_t0 + 500, _t0, {"a": _t0 + 450}, True) == ""
+          and results_page.exit_reason(
+              _t0 + 500, _t0, {"a": _t0 + 500 - results_page.CLIENT_TIMEOUT - 1},
+              True) == "page closed")
+    _clock = [_t0]
+    _pages = results_page._Clients(clock=lambda: _clock[0])
+    _pages.touch("old")
+    _pages.drop("old")
+    _clock[0] += results_page.WATCHDOG_TICK
+    check("a reload's goodbye does not end the server before the new page arrives",
+          _pages.exit_reason() == "")
+    _clock[0] = _t0 + results_page.BYE_GRACE + 1
+    check("but a page that really closed ends it once the grace is over",
+          _pages.exit_reason() == "page closed")
 
     section("newsletter.start_from_prose - the only route to a Tesla date")
     # Every tesla.com/event page answers 403 to this scraper, re-measured

@@ -3,7 +3,8 @@
     conda run --no-capture-output -n ML python scheduled_check.py snapshot
         read-only. Prints the clock, the ledger counts and the config floor.
     conda run --no-capture-output -n ML python scheduled_check.py run
-        snapshot, then `local_run.py --show-digest` (SENDS MAIL), then the
+        snapshot, then `local_run.py --email --no-html --show-digest`
+        (SENDS MAIL), then the
         snapshot again and the rows this run wrote, each LAST CALL checked
         against the reminder rules.
 
@@ -128,11 +129,13 @@ def _run() -> int:
     # UTF-8 for the child too, since a cp950 console encoding raises on the
     # Chinese in score reasons after the ledger has already moved.
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+    # --no-html because the run starts at 2 a.m. with nobody at the screen.
+    flags = ["--email", "--no-html", "--show-digest"]
     with LOG.open("wb") as log:
         code = subprocess.call(
-            [sys.executable, str(ROOT / "local_run.py"), "--show-digest"],
+            [sys.executable, str(ROOT / "local_run.py"), *flags],
             cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
-    print(f"=== local_run.py --show-digest exit code: {code} ===")
+    print(f"=== local_run.py {' '.join(flags)} exit code: {code} ===")
     print(f"full output (read it whole with the Read tool): {LOG}")
     after = _snapshot("AFTER")
     print("=== DELTA (after - before) ===")

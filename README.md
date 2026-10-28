@@ -70,7 +70,7 @@ Fill in `.env`. Point `PROFILE_PATH` at a resume or profile file, ideally one ke
 python local_run.py --dry-run
 ```
 
-A run with no flags sends mail. Other flags are documented in `local_run.py`, the useful ones being `--all` to re-report everything in scope when judging output quality, and `--reset` to forget the ledger.
+A run with no flags mails nothing. It records the events it found as delivered and opens a local results page at `http://127.0.0.1:8767/`, where each one can be saved, marked registered or dismissed, and the mark undone. `--email` mails the digest as well, and `--no-html` skips the page. The page can also be opened on its own with `python results_page.py`. Other flags are documented in `local_run.py`, the useful ones being `--all` to re-report everything in scope when judging output quality, and `--reset` to forget the ledger.
 
 Note that `--dry-run` is not read-only. It records every event it saw, but withholds the three timestamps that mean "you were told". Writing those before the mail is sent would turn one refused SMTP call into permanent silence.
 

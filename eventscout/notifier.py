@@ -104,6 +104,54 @@ def _lead_time(start: str, now: datetime) -> str:
     return f"in {int(hours // 24)} days"
 
 
+def describe_when(event: Event, zone: ZoneInfo, now: datetime, *,
+                  long_running: timedelta) -> str:
+    """The digest's `when:` text for one event, shared with the results page
+    so the page and the mail cannot describe the same event differently."""
+    lead = _lead_time(event.start, now)
+    # Converted, not sliced. The stored offset is whatever the
+    # SOURCE used, so slicing prints Pacific for Luma and UTC for
+    # WordPress. parse_iso fills in UTC for a naive stamp, which is the
+    # same assumption _lead_time beside it already makes, so the two
+    # cannot disagree about the same event.
+    start = parse_iso(event.start) if event.start else None
+    # %Z included so the line says which zone it is in. Mail cannot
+    # convert anything for a reader who is travelling, and the .ics
+    # attachment beside it carries UTC for the calendar to convert, so
+    # an unlabelled wall clock was the one ambiguity left here.
+    # No clock for an all-day event. Its start is local midnight by
+    # construction, so printing "00:00" would state a time the source
+    # never gave and send a reader to a job fair at midnight.
+    if start is None:
+        when = "date unknown"
+    elif event.all_day:
+        # An Eightfold registration runs for months, and its first day
+        # alone read as an event that started in February rather than
+        # one open until December.
+        first = start.astimezone(zone).strftime("%Y-%m-%d")
+        last = (parse_iso(event.end).astimezone(zone).strftime("%Y-%m-%d")
+                if event.end else first)
+        when = (f"{first} (all day)" if last == first
+                else f"{first} to {last} (all day)")
+    else:
+        when = start.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
+        # With no start grace, a timed event shown after its start is
+        # one long_running_days kept, and it gets no last call, so this
+        # line is the only place the reader learns when it closes.
+        end = parse_iso(event.end) if event.end else None
+        if end and start <= now < end:
+            when = f"{when} to {end.astimezone(zone).strftime('%Y-%m-%d %H:%M %Z')}"
+    if lead:
+        when = f"{when} ({lead})"
+    # Marks every event long_running_days covers, kept whatever the geo
+    # filter says and past its start. A long one not yet started prints
+    # its start alone, so without the label neither the reader nor the
+    # scheduled run's check could tell it from an ordinary event.
+    if event.runs_at_least(long_running):
+        when = f"{when} (long_running_event)"
+    return when
+
+
 def format_digest(sections: list[Section], zone: ZoneInfo,
                   now: datetime | None = None, *, long_running: timedelta) -> str:
     """Plain-text rendering shared by every notifier.
@@ -125,47 +173,7 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
             continue
         blocks.append(f"##### {name} ({len(items)}) #####\n")
         for event, score, urgency in items:
-            lead = _lead_time(event.start, now)
-            # Converted, not sliced. The stored offset is whatever the
-            # SOURCE used, so slicing prints Pacific for Luma and UTC for
-            # WordPress. parse_iso fills in UTC for a naive stamp, which is the
-            # same assumption _lead_time beside it already makes, so the two
-            # cannot disagree about the same event.
-            start = parse_iso(event.start) if event.start else None
-            # %Z included so the line says which zone it is in. Mail cannot
-            # convert anything for a reader who is travelling, and the .ics
-            # attachment beside it carries UTC for the calendar to convert, so
-            # an unlabelled wall clock was the one ambiguity left here.
-            # No clock for an all-day event. Its start is local midnight by
-            # construction, so printing "00:00" would state a time the source
-            # never gave and send a reader to a job fair at midnight.
-            if start is None:
-                when = "date unknown"
-            elif event.all_day:
-                # An Eightfold registration runs for months, and its first day
-                # alone read as an event that started in February rather than
-                # one open until December.
-                first = start.astimezone(zone).strftime("%Y-%m-%d")
-                last = (parse_iso(event.end).astimezone(zone).strftime("%Y-%m-%d")
-                        if event.end else first)
-                when = (f"{first} (all day)" if last == first
-                        else f"{first} to {last} (all day)")
-            else:
-                when = start.astimezone(zone).strftime("%Y-%m-%d %H:%M %Z")
-                # With no start grace, a timed event shown after its start is
-                # one long_running_days kept, and it gets no last call, so this
-                # line is the only place the reader learns when it closes.
-                end = parse_iso(event.end) if event.end else None
-                if end and start <= now < end:
-                    when = f"{when} to {end.astimezone(zone).strftime('%Y-%m-%d %H:%M %Z')}"
-            if lead:
-                when = f"{when} ({lead})"
-            # Marks every event long_running_days covers, kept whatever the geo
-            # filter says and past its start. A long one not yet started prints
-            # its start alone, so without the label neither the reader nor the
-            # scheduled run's check could tell it from an ordinary event.
-            if event.runs_at_least(long_running):
-                when = f"{when} (long_running_event)"
+            when = describe_when(event, zone, now, long_running=long_running)
             where = event.location or ("online" if event.is_virtual else "location unknown")
             blocks.append(
                 f"[{urgency}] {event.title}\n"
@@ -178,6 +186,8 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
 
 
 class EmailNotifier:
+    outcome = "EMAIL SENT."
+
     def __init__(self, user: str, app_password: str, mail_to: str,
                  timezone_name: str, host: str = "smtp.gmail.com",
                  port: int = 587, echo: bool = False, *, long_running_days: int):
@@ -233,15 +243,31 @@ class ConsoleNotifier:
     putting mail in the inbox while thresholds are still being tuned.
     """
 
+    outcome = "NO EMAIL SENT (dry run)."
+    _banner = "DRY RUN, no mail sent"
+
     def __init__(self, timezone_name: str, *, long_running_days: int):
         self._zone = display_zone(timezone_name)
         self._long_running = timedelta(days=long_running_days)
 
     def send(self, sections: list[Section], subject: str, footer: str = "") -> int:
         total = sum(len(items) for _, items in sections)
-        print(f"\n--- DRY RUN, no mail sent ---\nSubject: {subject}\n")
+        print(f"\n--- {self._banner} ---\nSubject: {subject}\n")
         print(format_digest(sections, self._zone, long_running=self._long_running)
               or "(no events)")
         if footer:
             print(f"---\n{footer}")
         return total
+
+
+class PageOnlyNotifier(ConsoleNotifier):
+    """Delivers to the results page alone. Prints the digest and mails nothing.
+
+    Used only with dry_run False, so the pipeline records these events as told,
+    because the results page lists exactly the rows carrying that record.
+    """
+
+    # Both print before the ledger commit, so they say where the events go,
+    # not that they were recorded.
+    outcome = "NO EMAIL SENT. These go to the results page."
+    _banner = "NOT EMAILED, these go to the results page"

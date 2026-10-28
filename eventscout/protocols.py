@@ -315,6 +315,10 @@ class EventStore(ScoreCache, Protocol):
 
 
 class Notifier(Protocol):
+    # What the RESULT block prints after a send that returned, so a run that
+    # recorded events without mailing them cannot claim EMAIL SENT.
+    outcome: str
+
     def send(self, sections: list[Section], subject: str, footer: str = "") -> int:
         """Send one digest and return how many events it carried.
 

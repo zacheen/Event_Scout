@@ -615,9 +615,8 @@ def _deliver(digest: Digest, funnel: Funnel, store: EventStore,
     print(f"  {sent} events  |  {composed.tally}")
     # Restated here because the header has scrolled far off screen by now, and
     # "did that just email me?" is the one question the output must never leave
-    # ambiguous.
-    print("  NO EMAIL SENT (dry run)." if dry_run
-          else "  EMAIL SENT.")
+    # ambiguous. From the notifier, not from dry_run.
+    print(f"  {notifier.outcome}")
     if not dry_run:
         # After the send, never before: every line here claims the reader has
         # seen these, and notifier.send raises when SMTP refuses.
