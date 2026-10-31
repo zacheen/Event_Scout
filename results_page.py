@@ -296,7 +296,10 @@ def _watchdog(clients: _Clients) -> None:
         if why:
             # os._exit, not sys.exit, which would only end this thread.
             # Every write commits inside its own request, so no mark is cut off.
-            print("exiting: " + why)
+            # os._exit also skips flushing stdout, which redirected to a file is
+            # block-buffered, so without flush=True this line and every earlier
+            # one are lost.
+            print("exiting: " + why, flush=True)
             os._exit(0)
 
 
@@ -562,7 +565,7 @@ def serve() -> int:
         # Another launch bound the port between listener() and here.
         print(f"port {PORT} could not be bound: {exc}")
         return 1
-    print("Event Scout results at " + URL)
+    print("Event Scout results at " + URL, flush=True)
     # After the bind, or a failed one would still pop a tab.
     threading.Timer(0.8, lambda: webbrowser.open(URL)).start()
     threading.Thread(target=_watchdog, args=(server.clients,), daemon=True).start()
