@@ -65,6 +65,11 @@ class BoundedSource(EventSource, Protocol):
 class EventFilter(Protocol):
     def keep(self, event: Event) -> bool: ...
 
+    def keep_long_running(self, event: Event) -> bool:
+        """Decides, in place of keep, an event whose window spans
+        long_running_days or more."""
+        ...
+
 
 class Extractor(Protocol):
     """Fills fields a source could not supply, e.g. a start date buried in prose.

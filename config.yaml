@@ -305,12 +305,13 @@ display_timezone: "America/Los_Angeles"
 lookahead_days: 120
 # A listing open this many days or more gets two exceptions. Once started it
 # stays in scope while its end is more than this far away, and when its stated
-# window spans this long it skips the geo filter. Many such windows are
-# registrations for an in-person event elsewhere, which is accepted, and 30 is
-# a starting point to tune against the digests it produces. In one run over the
-# Eightfold tenants, 68 events passed instead of 26, and most of the 42 added
-# were campus events in Singapore and at other schools. No ledger row from any
-# other source had a window this long.
+# window spans this long the geo filter judges only its country, against
+# channels.yaml geo.long_running_countries. Many such windows are registrations
+# for an in-person event in another US city, which is accepted, and the value
+# is a starting point to tune against the digests it produces. Before the country
+# test, one run over the Eightfold tenants passed 68 events instead of 26, and
+# most of the 42 added were campus events in Singapore and at other schools. No
+# ledger row from any other source had a window this long.
 long_running_days: 30
 
 # --- Delivery --------------------------------------------------------------

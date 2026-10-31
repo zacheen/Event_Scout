@@ -121,10 +121,10 @@ def load_settings(config_path: Path | None = None) -> Settings:
     first = raw.get("first_run") or {}
     _check_policies(raw, first)
     long_running_days = int(raw.get("long_running_days", 30))
-    # 0 reads as "off" and does the opposite: every event with a stated end
-    # skips the geo filter and a started one stays while its end is ahead. A
-    # negative value makes SQLite's datetime() return NULL, so expire_past
-    # never retires a row with an end. Neither raises on its own.
+    # 0 reads as "off" and does the opposite: every event with a stated end is
+    # judged by country rather than city and a started one stays while its end
+    # is ahead. A negative value makes SQLite's datetime() return NULL, so
+    # expire_past never retires a row with an end. Neither raises on its own.
     if long_running_days < 1:
         raise ValueError(f"config.yaml long_running_days={long_running_days} must be at "
                          "least 1; a large value such as 3650 switches the rule off")
@@ -474,4 +474,4 @@ def build_geo(channels: dict) -> GeoFilter:
                 for e in channels.get(block) or [] if e.get("in_region")}
     search_area = [(a["lat"], a["lon"], a["radius_mi"]) for a in geo.get("search_area") or ()]
     return GeoFilter(places, bool(geo.get("accept_virtual", True)), frozenset(regional),
-                     search_area)
+                     search_area, geo.get("long_running_countries") or ())

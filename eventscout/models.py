@@ -218,8 +218,8 @@ class Event:
     def runs_at_least(self, span: timedelta) -> bool:
         """Whether the start-to-end window is `span` or longer.
 
-        Shared by the pipeline, which keeps such an event whatever the geo
-        filter says, and the digest, which labels it, so the label marks every
+        Shared by the pipeline, which judges such an event by country rather
+        than city, and the digest, which labels it, so the label marks every
         event the rule covers, even one the geo filter keeps anyway.
         """
         start = parse_iso(self.start) if self.start else None

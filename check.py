@@ -1067,16 +1067,25 @@ def offline() -> None:
         finally:
             db.close()
 
-    section("pipeline - a listing open a month or more skips the place test")
+    section("pipeline - a listing open a month or more is judged by country")
     # long_running_days on both stages at once: "open" started before _NOW and
-    # runs to December from a place geo rejects, "boston" must still be dropped.
+    # runs to December from a US campus geo rejects, while "abroad" runs as
+    # long from Singapore and "boston" is short, so both must be dropped.
+    # "abroad" is online, which geo.keep would pass under accept_virtual.
     class _Open:
         kind = name = "jsonld"
 
         def fetch(self):
             return [replace(_listing("jsonld", "https://luma.com/open"),
                             event_uid="jsonld:open", start="2026-09-01T18:00:00-07:00",
-                            end="2026-12-31T18:00:00-08:00", location="Singapore"),
+                            end="2026-12-31T18:00:00-08:00",
+                            location="Purdue University, NA, N/A"),
+                    replace(_listing("jsonld", "https://luma.com/abroad"),
+                            event_uid="jsonld:abroad", title="Abroad",
+                            start="2026-09-01T18:00:00-07:00",
+                            end="2026-12-31T18:00:00-08:00",
+                            location="Online registration, listed at Various, Singapore",
+                            attendance_mode=AttendanceMode.ONLINE),
                     replace(_listing("jsonld", "https://luma.com/boston"),
                             event_uid="jsonld:boston", location="Boston, MA")]
 
@@ -1101,8 +1110,11 @@ def offline() -> None:
                   "https://luma.com/open" in _open_box.mailed
                   and "https://luma.com/boston" not in _open_box.mailed,
                   f"mailed {_open_box.mailed}")
-            check("and the funnel says it skipped the place test",
-                  "1 kept without a place test" in line, f"line: {line!r}")
+            check("but not one as long from a country outside long_running_countries",
+                  "https://luma.com/abroad" not in _open_box.mailed,
+                  f"mailed {_open_box.mailed}")
+            check("and the funnel counts both",
+                  "1 kept by country and 1 dropped as abroad" in line, f"line: {line!r}")
             _open_states = dict(db._conn.execute(
                 "SELECT event_uid, state FROM events").fetchall())
             check("and run() keeps its ledger row live while retiring one ending sooner",
@@ -4456,6 +4468,56 @@ def offline() -> None:
           padded.keep(_event(source="other", location="San Jose, CA",
                              attendance_mode=AttendanceMode.OFFLINE)),
           "the entry compiled with its spaces and can never match")
+
+    section("geo.GeoFilter.keep_long_running - a long listing is judged by country")
+    # From channels.yaml, so these prove the deployed long_running_countries.
+    for why, loc, mode, want in [
+            ("a campus abroad is dropped", "National University of Singapore, Singapore",
+             AttendanceMode.OFFLINE, False),
+            ("so is a country named alone", "Tokyo, Japan", AttendanceMode.OFFLINE, False),
+            ("an online registration abroad is dropped whatever accept_virtual says",
+             "Online registration, listed at Various, Singapore", AttendanceMode.ONLINE, False),
+            ("a US state code is enough", "Hynes Convention Center, Boston, MA 02115",
+             AttendanceMode.OFFLINE, True),
+            ("so is a spelled-out US state", "Medford, Massachusetts 02155",
+             AttendanceMode.OFFLINE, True),
+            ("Taiwan written in Chinese is kept", "台灣美光, 台灣", AttendanceMode.OFFLINE, True),
+            ("a home country wins over a foreign one beside it", "Taiwan, Province of China",
+             AttendanceMode.OFFLINE, True),
+            ("New Mexico is not Mexico", "New Mexico State University",
+             AttendanceMode.OFFLINE, True),
+            ("a location naming no country is kept", "Purdue University, NA, N/A",
+             AttendanceMode.OFFLINE, True),
+            ("so is a bare online one", "Online registration", AttendanceMode.ONLINE, True),
+            ("a Bay Area city wins over a country word", "Japan Innovation Campus, Palo Alto",
+             AttendanceMode.OFFLINE, True),
+            ("a lower-case 'in' is not Indiana", "Singapore, in person",
+             AttendanceMode.OFFLINE, False),
+            ("and 'us' is not the United States", "Singapore, meet us there",
+             AttendanceMode.OFFLINE, False)]:
+        got = bay.keep_long_running(_event(source="other", location=loc, attendance_mode=mode))
+        check(why, got is want, f"{loc!r} kept={got}")
+    _palo_alto = (37.4436, -122.1607)
+    check("a position inside the search area wins over a country word",
+          bay.keep_long_running(_event(source="other", location="Japan Innovation Campus",
+                                       coordinates=_palo_alto)),
+          "a Palo Alto venue named after Japan was dropped")
+    check("an empty country list keeps every long listing, as before the setting",
+          GeoFilter(("san jose",)).keep_long_running(_event(location="Singapore")))
+    check("a capitalised country entry still resolves",
+          not GeoFilter(("san jose",), long_running_countries=("Taiwan",))
+          .keep_long_running(_event(location="Singapore")))
+    # A bare string would also fail as unknown, one letter at a time, so only
+    # TypeError proves the message names the real mistake.
+    for why, countries, error in [("an unknown country name", ("untied states",), ValueError),
+                                  ("one bare string instead of a list", "taiwan", TypeError)]:
+        refused = False
+        try:
+            GeoFilter(("san jose",), long_running_countries=countries)
+        except error:
+            refused = True
+        check(f"{why} in long_running_countries is refused rather than built", refused,
+              "it built, so every long listing would be judged against the wrong countries")
 
     section("extract - typed markup beats asking a model to read prose")
     # See PageFactExtractor's class docstring for the measured split behind

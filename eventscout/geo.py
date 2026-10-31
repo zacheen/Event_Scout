@@ -53,6 +53,105 @@ _US_STATES = {
 }
 _STATE_CODES = {code: name for name, code in _US_STATES.items()}
 
+# Country names for keep_long_running, keyed by the name channels.yaml uses.
+# Georgia is left out because it is also a US state, which "Georgia Institute
+# of Technology, NA, N/A" names without a country. A US state name counts as
+# the United States wherever it appears, so a foreign address on a Washington
+# Avenue is kept, a stray rather than a US listing lost.
+_COUNTRIES: dict[str, tuple[str, ...]] = {
+    "united states": ("united states of america", "usa", "u.s.a.", "u.s.", "美國", "美国",
+                      "puerto rico", "guam", *_US_STATES),
+    "taiwan": ("台灣", "臺灣", "台湾"),
+    "afghanistan": (), "albania": (), "algeria": (), "andorra": (), "angola": (),
+    "antigua and barbuda": (), "argentina": (), "armenia": (), "australia": (),
+    "austria": (), "azerbaijan": (), "bahamas": (), "bahrain": (), "bangladesh": (),
+    "barbados": (), "belarus": (), "belgium": (), "belize": (), "benin": (), "bhutan": (),
+    "bolivia": (), "bosnia and herzegovina": ("bosnia",), "botswana": (), "brazil": (),
+    "brunei": (), "bulgaria": (), "burkina faso": (), "burundi": (),
+    "cabo verde": ("cape verde",), "cambodia": (), "cameroon": (), "canada": (),
+    "central african republic": (), "chad": (), "chile": (), "china": ("中國", "中国"),
+    "colombia": (), "comoros": (), "congo": (), "costa rica": (),
+    "cote d'ivoire": ("côte d'ivoire", "ivory coast"), "croatia": (), "cuba": (),
+    "cyprus": (), "czechia": ("czech republic",), "denmark": (), "djibouti": (),
+    "dominica": (), "dominican republic": (), "ecuador": (), "egypt": (),
+    "el salvador": (), "equatorial guinea": (), "eritrea": (), "estonia": (),
+    "eswatini": (), "ethiopia": (), "fiji": (), "finland": (), "france": (), "gabon": (),
+    "gambia": (), "germany": ("deutschland",), "ghana": (), "greece": (), "grenada": (),
+    "guatemala": (), "guinea": (), "guinea-bissau": (), "guyana": (), "haiti": (),
+    "honduras": (), "hong kong": ("香港",), "hungary": (), "iceland": (),
+    "india": ("印度",), "indonesia": (), "iran": (), "iraq": (), "ireland": (),
+    "israel": (), "italy": (), "jamaica": (), "japan": ("日本",), "jordan": (),
+    "kazakhstan": (), "kenya": (), "kiribati": (), "kosovo": (), "kuwait": (),
+    "kyrgyzstan": (), "laos": (), "latvia": (), "lebanon": (), "lesotho": (),
+    "liberia": (), "libya": (), "liechtenstein": (), "lithuania": (), "luxembourg": (),
+    "macau": ("macao", "澳門", "澳门"), "madagascar": (), "malawi": (),
+    "malaysia": ("馬來西亞", "马来西亚"), "maldives": (), "mali": (), "malta": (),
+    "marshall islands": (), "mauritania": (), "mauritius": (), "mexico": ("méxico",),
+    "micronesia": (), "moldova": (), "monaco": (), "mongolia": (), "montenegro": (),
+    "morocco": (), "mozambique": (), "myanmar": ("burma",), "namibia": (), "nauru": (),
+    "nepal": (), "netherlands": ("holland",), "new zealand": (), "nicaragua": (),
+    "niger": (), "nigeria": (), "north korea": (), "north macedonia": (), "norway": (),
+    "oman": (), "pakistan": (), "palau": (), "palestine": (), "panama": (),
+    "papua new guinea": (), "paraguay": (), "peru": (), "philippines": ("菲律賓", "菲律宾"),
+    "poland": (), "portugal": (), "qatar": (), "romania": (), "russia": (), "rwanda": (),
+    "saint kitts and nevis": (), "saint lucia": (), "saint vincent and the grenadines": (),
+    "samoa": (), "san marino": (), "sao tome and principe": (), "saudi arabia": (),
+    "senegal": (), "serbia": (), "seychelles": (), "sierra leone": (),
+    "singapore": ("新加坡",), "slovakia": (), "slovenia": (), "solomon islands": (),
+    "somalia": (), "south africa": (),
+    "south korea": ("korea", "republic of korea", "韓國", "韩国", "南韓"),
+    "south sudan": (), "spain": (), "sri lanka": (), "sudan": (), "suriname": (),
+    "sweden": (), "switzerland": (), "syria": (), "tajikistan": (), "tanzania": (),
+    "thailand": ("泰國", "泰国"), "timor-leste": (), "togo": (), "tonga": (),
+    "trinidad and tobago": (), "tunisia": (), "turkey": ("türkiye", "turkiye"),
+    "turkmenistan": (), "tuvalu": (), "uganda": (), "ukraine": (),
+    "united arab emirates": ("uae",),
+    "united kingdom": ("uk", "england", "scotland", "wales", "great britain"),
+    "uruguay": (), "uzbekistan": (), "vanuatu": (), "vatican city": (), "venezuela": (),
+    "vietnam": ("viet nam", "越南"), "yemen": (), "zambia": (), "zimbabwe": (),
+}
+
+
+class CountryMatcher:
+    """Country test for GeoFilter.keep_long_running.
+
+    `home` are _COUNTRIES keys. A location passes when it names a home country
+    or no country at all, and fails when it names only another one. Empty home
+    passes every location.
+    """
+
+    def __init__(self, home: Sequence[str] = ()):
+        if isinstance(home, str):
+            raise TypeError("GeoFilter long_running_countries must be a sequence of names, "
+                            "not one string")
+        names = {_normalise(c) if isinstance(c, str) else c for c in home}
+        unknown = sorted(map(repr, names - _COUNTRIES.keys()))
+        if unknown:
+            raise ValueError(f"GeoFilter long_running_countries has unknown {', '.join(unknown)} "
+                             "(channels.yaml geo.long_running_countries, see geo._COUNTRIES)")
+        self._home = tuple(p for c in names for p in self._patterns(c))
+        self._abroad = (tuple(p for c in _COUNTRIES.keys() - names for p in self._patterns(c))
+                        if names else ())
+
+    def admits(self, location: str) -> bool:
+        text = re.sub(r"\s+", " ", location or "")
+        if any(p.search(text) for p in self._home):
+            return True
+        return not any(p.search(text) for p in self._abroad)
+
+    @staticmethod
+    def _patterns(country: str) -> tuple[re.Pattern, ...]:
+        """Whole-word patterns for one _COUNTRIES key, matched against the raw
+        location. A US state code and "US" must be upper case, so "join us" and
+        "Online, in person" are not read as the United States or Indiana."""
+        patterns = [re.compile(rf"(?<![a-z]){re.escape(n)}(?![a-z])", re.IGNORECASE)
+                    for n in (country, *_COUNTRIES[country])]
+        if country == "united states":
+            codes = "|".join(c.upper() for c in _STATE_CODES)
+            patterns += [re.compile(rf",\s*(?:{codes})(?![A-Za-z])"),
+                         re.compile(r"(?<![A-Za-z.])US(?![A-Za-z])")]
+        return tuple(patterns)
+
 
 def _normalise(location: str) -> str:
     """Lower-cased, with whitespace and the space after each comma made uniform.
@@ -93,6 +192,10 @@ class GeoFilter:
     `search_area` is (latitude, longitude, radius in miles) per centre, from
     channels.yaml geo.search_area. An event with coordinates within any one
     radius is in region. Empty leaves the name rules as the only test.
+
+    `long_running_countries` are _COUNTRIES keys from channels.yaml
+    geo.long_running_countries, read by keep_long_running. Empty lets every
+    long listing through.
     """
 
     def __init__(
@@ -101,6 +204,7 @@ class GeoFilter:
         accept_virtual: bool = True,
         regional_sources: frozenset[str] = frozenset(),
         search_area: Sequence[tuple[float, float, float]] = (),
+        long_running_countries: Sequence[str] = (),
     ):
         # Validated here rather than in build_geo, because a blank entry
         # compiles to a pattern that matches every location and a bare string
@@ -127,6 +231,7 @@ class GeoFilter:
                                  f"per centre (channels.yaml geo.search_area), got {c!r}")
             centres.append((point, float(c[2])))
         self._search_area = tuple(centres)
+        self._countries = CountryMatcher(long_running_countries)
 
     def keep(self, event: Event) -> bool:
         # A named Bay Area city wins over everything, INCLUDING virtual, unless
@@ -152,11 +257,10 @@ class GeoFilter:
         # location or a town the list leaves out. On one fetch the name rules
         # dropped 37 events from four sources that carried coordinates, and all
         # 37 were within 50 miles. After the name match so that fast path is
-        # unchanged, and ahead of the online-mode test, as a named city is, so
-        # a position decides whatever accept_virtual says.
+        # unchanged, and ahead of the online-mode test, so a position outranks
+        # an online attendance mode.
         if event.coordinates is not None and self._search_area:
-            return any(_miles(event.coordinates, centre) <= radius
-                       for centre, radius in self._search_area)
+            return self._within_search_area(event)
         # A named non-Bay-Area city beats an online attendance MODE, as
         # _VIRTUAL_HINTS gives text precedence over the mode. cerebralvalley.ai
         # marks World AI Week online (VirtualLocation) while its own page names
@@ -182,6 +286,25 @@ class GeoFilter:
         # student-life calendar writes "Welcome Center" and "Room 1045" and all
         # 15 of its events were dropped as out of region.
         return event.page_unreadable or event.source in self._regional_sources
+
+    def keep_long_running(self, event: Event) -> bool:
+        """Decides a listing open long_running_days or more, in place of keep.
+
+        Such a window is usually a registration, so its listed city may not be
+        where the reader goes, and only a country is judged. In place of keep
+        rather than after it, because keep's accept_virtual passes "Online
+        registration, listed at Various, Singapore". A location naming no
+        country is kept, because Eightfold lists US campuses as "Purdue
+        University, NA, N/A" and a Malaysian polytechnic by its name alone, and
+        losing the first costs more than admitting the second. A Bay Area name
+        or position still wins, so "Japan Innovation Campus" in Palo Alto stays.
+        """
+        return (self._matches_name(event.location) or self._within_search_area(event)
+                or self._countries.admits(event.location))
+
+    def _within_search_area(self, event: Event) -> bool:
+        return event.coordinates is not None and any(
+            _miles(event.coordinates, centre) <= radius for centre, radius in self._search_area)
 
     @staticmethod
     def _text_says_virtual(location: str) -> bool:

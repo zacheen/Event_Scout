@@ -143,8 +143,8 @@ def describe_when(event: Event, zone: ZoneInfo, now: datetime, *,
             when = f"{when} to {end.astimezone(zone).strftime('%Y-%m-%d %H:%M %Z')}"
     if lead:
         when = f"{when} ({lead})"
-    # Marks every event long_running_days covers, kept whatever the geo
-    # filter says and past its start. A long one not yet started prints
+    # Marks every event long_running_days covers, judged by country rather
+    # than city and kept past its start. A long one not yet started prints
     # its start alone, so without the label neither the reader nor the
     # scheduled run's check could tell it from an ordinary event.
     if event.runs_at_least(long_running):
@@ -164,7 +164,7 @@ def format_digest(sections: list[Section], zone: ZoneInfo,
     against was exactly a time rendered in a zone nobody chose (see
     display_zone). `long_running` is settings.long_running_days, required for
     the same reason, since a default could label different events from the
-    ones the pipeline keeps whatever the geo filter says.
+    ones the pipeline judges by country.
     """
     now = now or datetime.now(timezone.utc)
     blocks: list[str] = []

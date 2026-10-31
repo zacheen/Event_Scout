@@ -195,6 +195,15 @@ geo:
   # For JSON-LD sources, marked online means `eventAttendanceMode` ==
   # OnlineEventAttendanceMode.
   accept_virtual: true
+  # A listing open long_running_days (config.yaml) or more is judged by country
+  # in place of the rules above, accept_virtual included. It passes when its
+  # location names a Bay Area city or its coordinates fall inside search_area,
+  # or when it names one of these countries or no country at all, and is
+  # dropped when it names another country. Names are the keys of
+  # geo._COUNTRIES. Empty lets every such listing through wherever it is held.
+  long_running_countries:
+    - united states
+    - taiwan
 
 # ---------------------------------------------------------------------------
 # TIER A1 - Gmail label. Highest recall, zero ToS risk.

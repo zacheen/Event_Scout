@@ -322,20 +322,22 @@ def run(sources: list[EventSource], store: EventStore, geo: EventFilter,
         funnel.stage("after title+time dedupe", len(deduped),
                      f"{before - len(deduped)} collapsed onto another listing")
 
-    # A window of long_running_days or more is a registration or an open
-    # listing rather than one gathering, so where it is listed does not decide
-    # whether the reader can take part (config.yaml has what this admits).
+    # A window of long_running_days or more is judged by country alone, for
+    # the reason in keep_long_running's docstring.
     long_running = timedelta(days=settings.long_running_days)
-    in_region, unplaced = [], 0
+    in_region, long_kept, abroad = [], 0, 0
     for e in deduped:
-        if geo.keep(e):
+        if not e.runs_at_least(long_running):
+            if geo.keep(e):
+                in_region.append(e)
+        elif geo.keep_long_running(e):
             in_region.append(e)
-        elif e.runs_at_least(long_running):
-            in_region.append(e)
-            unplaced += 1
+            long_kept += 1
+        else:
+            abroad += 1
     funnel.stage("after geo filter", len(in_region),
-                 f"{unplaced} kept without a place test, open "
-                 f"{settings.long_running_days}d or more" if unplaced else "")
+                 f"open {settings.long_running_days}d or more, {long_kept} kept by "
+                 f"country and {abroad} dropped as abroad" if long_kept or abroad else "")
 
     horizon = now + timedelta(days=settings.lookahead_days)
     # Name the bound that cut them, because the two mean opposite things: below
